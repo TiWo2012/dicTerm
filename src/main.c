@@ -1,11 +1,22 @@
+#include <raylib.h>
 #include <stdio.h>
 
 int main(void) {
-  printf("Hello, World!\n");
+  SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+  InitWindow(800, 600, "dicTerm");
+  SetTargetFPS(60);
 
-  auto test = 12.0f;
+  while (!WindowShouldClose()) {
+    BeginDrawing();
 
-  printf("%f\n", test);
+    ClearBackground(RAYWHITE);
+
+    DrawFPS(10, 10);
+
+    EndDrawing();
+  }
+
+  CloseWindow();
 
   return 0;
 }

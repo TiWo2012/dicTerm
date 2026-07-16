@@ -8,6 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c2y -Wall -Wextra -Werror -g")
 
+find_package(raylib REQUIRED)
+
 file(GLOB_RECURSE C_SOURCES CONFIGURE_DEPENDS src/*.c)
 
 add_executable(${PROJECT_NAME} ${C_SOURCES})
@@ -15,4 +17,9 @@ add_executable(${PROJECT_NAME} ${C_SOURCES})
 target_include_directories(${PROJECT_NAME}
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
+)
+
+target_link_libraries(${PROJECT_NAME}
+    PRIVATE
+        raylib
 )
