@@ -4,15 +4,13 @@
 #include <fcntl.h>
 #include <pty.h>
 #include <raylib.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
-#include <termios.h>
 #include <unistd.h>
 
+#include "input.h"
 #include "parser.h"
 
 #define ROWS 36
@@ -29,24 +27,7 @@ typedef struct {
   parser_t parser;
 } terminal_t;
 
-static struct termios original_termios;
 
-static void restore_terminal(void) { tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios); }
-
-static void enable_raw_mode(void) {
-  if (tcgetattr(STDIN_FILENO, &original_termios) == -1) {
-    perror("tcgetattr");
-    exit(1);
-  }
-  atexit(restore_terminal);
-
-  struct termios raw = original_termios;
-  cfmakeraw(&raw);
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
-    perror("tcsetattr");
-    exit(1);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Screen helpers
@@ -316,7 +297,6 @@ static void on_string(const char *str, void *ctx) {
 
 int main(void) {
   InitWindow(800, 600, "dicTerm");
-  enable_raw_mode();
 
   int master_fd;
   pid_t pid = forkpty(&master_fd, NULL, NULL, NULL);
@@ -357,51 +337,32 @@ int main(void) {
   parser_init(&term.parser, &cbs, &term);
 
   while (!WindowShouldClose()) {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(STDIN_FILENO, &readfds);
-    FD_SET(master_fd, &readfds);
-
-    int maxfd = (STDIN_FILENO > master_fd) ? STDIN_FILENO : master_fd;
-
-    struct timeval tv = {0, 16000};
-    if (select(maxfd + 1, &readfds, NULL, NULL, &tv) == -1) {
-      if (errno == EINTR)
-        goto draw;
-      perror("select");
-      break;
-    }
-
-    // Forward keyboard input to the child process.
-    if (FD_ISSET(STDIN_FILENO, &readfds)) {
-      char buf[4096];
-      ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+    // Read PTY output (non-blocking) and feed it into the escape-sequence
+    // parser.  We drain the fd so the shell doesn't stall on writes.
+    for (;;) {
+      char buf[65536];
+      ssize_t n = read(master_fd, buf, sizeof(buf));
       if (n > 0) {
-        ssize_t written = 0;
-        while (written < n) {
-          ssize_t r = write(master_fd, buf + written, (size_t)(n - written));
-          if (r > 0) {
-            written += r;
-          } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            break;
-          } else {
-            break;
-          }
-        }
+        parser_feed(&term.parser, (const uint8_t *)buf, (size_t)n);
+      } else if (n == 0) {
+        // PTY closed – child exited.
+        goto done;
+      } else {
+        // EAGAIN / EWOULDBLOCK means no data right now – move on.
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+          break;
+        // Real error.
+        perror("read(master_fd)");
+        goto done;
       }
     }
 
-    // Read PTY output and feed it into the escape-sequence parser.
-    if (FD_ISSET(master_fd, &readfds)) {
-      char buf[65536];
-      ssize_t n = read(master_fd, buf, sizeof(buf));
-      if (n <= 0)
-        break;
-
-      parser_feed(&term.parser, (const uint8_t *)buf, (size_t)n);
+    // Process raylib keyboard input and forward to the child.
+    if (process_keyboard_input(master_fd) < 0) {
+      perror("write(master_fd)");
+      // Non-fatal; keep running.
     }
 
-draw:
     BeginDrawing();
     ClearBackground(RAYWHITE);
 
@@ -422,6 +383,7 @@ draw:
     EndDrawing();
   }
 
+done:
   CloseWindow();
   return 0;
 }
