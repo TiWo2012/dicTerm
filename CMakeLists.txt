@@ -34,3 +34,18 @@ target_include_directories(test_parser
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
 )
+
+# Register with CTest.
+enable_testing()
+add_test(NAME test_parser COMMAND test_parser)
+
+# Auto-run tests in Debug builds: tests must pass before the build completes.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_custom_command(TARGET test_parser POST_BUILD
+        COMMAND $<TARGET_FILE:test_parser>
+        COMMENT "Running parser unit tests..."
+        USES_TERMINAL
+    )
+    # Ensure the main target cannot succeed unless tests pass.
+    add_dependencies(${PROJECT_NAME} test_parser)
+endif()
