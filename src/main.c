@@ -490,6 +490,20 @@ int main(void) {
       DrawText(line, WIN_PADDING, WIN_PADDING + r * FONT_SIZE, FONT_SIZE, BLACK);
     }
 
+
+    // Draw block cursor at (cx + 1, cy) - draws after the current character position
+    if (term.cx < COLS && term.cy >= 0 && term.cy < ROWS) {
+      int y_offset = WIN_PADDING + term.cy * FONT_SIZE;
+      
+      // cursor_x+1: Draw after the last text column, at the next position
+      int cursor_x = WIN_PADDING + (term.cx + 1) * CHAR_WIDTH;
+      int cursor_y = y_offset;
+      int cursor_w = CHAR_WIDTH;
+      int cursor_h = FONT_SIZE - 2;  // slightly less than full text height
+      
+      DrawRectangle(cursor_x, cursor_y, cursor_w, cursor_h, BLACK);
+    }
+
     // Draw scroll indicator in top-right corner (if scrolled back).
     if (sb_visible > 0) {
       char indicator[32];
