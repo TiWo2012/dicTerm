@@ -13,6 +13,9 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define ROWS 36
+#define COLS 100
+
 static struct termios original_termios;
 
 static void restore_terminal(void) {
@@ -27,6 +30,13 @@ static void enable_raw_mode(void) {
   cfmakeraw(&raw);
 
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+static void scroll_buffer(char buf[ROWS][COLS]) {
+  for (int i = 0; i < ROWS - 1; i++)
+    memcpy(buf[i], buf[i + 1], COLS);
+
+  memset(buf[ROWS - 1], ' ', COLS);
 }
 
 int main(void) {
@@ -50,11 +60,14 @@ int main(void) {
 
   SetTargetFPS(60);
 
-  while (!WindowShouldClose()) {
-    BeginDrawing();
-    ClearBackground(RAYWHITE);
-    fd_set readfds;
+  char screen[ROWS][COLS];
+  for (int r = 0; r < ROWS; r++)
+    memset(screen[r], ' ', COLS);
 
+  int cx = 0, cy = 0;
+
+  while (!WindowShouldClose()) {
+    fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(STDIN_FILENO, &readfds);
     FD_SET(master_fd, &readfds);
@@ -96,10 +109,57 @@ int main(void) {
       if (n <= 0)
         break;
 
-      DrawText(buf, 10, 10, 20, BLACK);
+      for (ssize_t i = 0; i < n; i++) {
+        char ch = buf[i];
+
+        if (ch == '\n') {
+          cx = 0;
+          cy++;
+          if (cy >= ROWS) {
+            scroll_buffer(screen);
+            cy = ROWS - 1;
+          }
+        } else if (ch == '\r') {
+          cx = 0;
+        } else if (ch == '\t') {
+          int next = ((cx / 8) + 1) * 8;
+          if (next < COLS)
+            cx = next;
+        } else if (ch == '\b') {
+          if (cx > 0)
+            cx--;
+        } else if (ch >= ' ') {
+          screen[cy][cx] = ch;
+          cx++;
+          if (cx >= COLS) {
+            cx = 0;
+            cy++;
+            if (cy >= ROWS) {
+              scroll_buffer(screen);
+              cy = ROWS - 1;
+            }
+          }
+        }
+      }
     }
 
 draw:
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
+
+    for (int r = 0; r < ROWS; r++) {
+      char line[COLS + 1];
+      memcpy(line, screen[r], COLS);
+      line[COLS] = '\0';
+
+      int len = COLS;
+      while (len > 0 && line[len - 1] == ' ')
+        len--;
+      line[len] = '\0';
+
+      DrawText(line, 10, 10 + r * 20, 20, BLACK);
+    }
+
     EndDrawing();
   }
 
