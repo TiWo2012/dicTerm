@@ -13,31 +13,306 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "parser.h"
+
 #define ROWS 36
 #define COLS 100
 
+// ---------------------------------------------------------------------------
+// Terminal state
+// ---------------------------------------------------------------------------
+
+typedef struct {
+  char screen[ROWS][COLS];
+  int cx, cy;        // cursor position
+  int saved_cx, saved_cy; // saved cursor position (DECSC/DECRC)
+  parser_t parser;
+} terminal_t;
+
 static struct termios original_termios;
 
-static void restore_terminal(void) {
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios);
-}
+static void restore_terminal(void) { tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios); }
 
 static void enable_raw_mode(void) {
-  tcgetattr(STDIN_FILENO, &original_termios);
+  if (tcgetattr(STDIN_FILENO, &original_termios) == -1) {
+    perror("tcgetattr");
+    exit(1);
+  }
   atexit(restore_terminal);
 
   struct termios raw = original_termios;
   cfmakeraw(&raw);
-
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
+    perror("tcsetattr");
+    exit(1);
+  }
 }
 
-static void scroll_buffer(char buf[ROWS][COLS]) {
+// ---------------------------------------------------------------------------
+// Screen helpers
+// ---------------------------------------------------------------------------
+
+static void scroll_buffer(char screen[ROWS][COLS]) {
   for (int i = 0; i < ROWS - 1; i++)
-    memcpy(buf[i], buf[i + 1], COLS);
-
-  memset(buf[ROWS - 1], ' ', COLS);
+    memcpy(screen[i], screen[i + 1], COLS);
+  memset(screen[ROWS - 1], ' ', COLS);
 }
+
+static void clear_screen(char screen[ROWS][COLS]) {
+  for (int r = 0; r < ROWS; r++)
+    memset(screen[r], ' ', COLS);
+}
+
+static void clear_line(char screen[ROWS][COLS], int row, int col_start) {
+  if (row >= 0 && row < ROWS)
+    memset(screen[row] + col_start, ' ', (size_t)(COLS - col_start));
+}
+
+static void clear_line_all(char screen[ROWS][COLS], int row) {
+  if (row >= 0 && row < ROWS)
+    memset(screen[row], ' ', COLS);
+}
+
+// ---------------------------------------------------------------------------
+// Clamp cursor to bounds (without scrolling)
+// ---------------------------------------------------------------------------
+
+static void clamp_cursor(terminal_t *t) {
+  if (t->cx < 0)  t->cx = 0;
+  if (t->cx >= COLS) t->cx = COLS - 1;
+  if (t->cy < 0)  t->cy = 0;
+  if (t->cy >= ROWS) t->cy = ROWS - 1;
+}
+
+// ---------------------------------------------------------------------------
+// Parser callbacks
+// ---------------------------------------------------------------------------
+
+static void on_print(char ch, void *ctx) {
+  terminal_t *t = (terminal_t *)ctx;
+  t->screen[t->cy][t->cx] = ch;
+  t->cx++;
+  if (t->cx >= COLS) {
+    t->cx = 0;
+    t->cy++;
+    if (t->cy >= ROWS) {
+      scroll_buffer(t->screen);
+      t->cy = ROWS - 1;
+    }
+  }
+}
+
+static void on_execute(char c0, void *ctx) {
+  terminal_t *t = (terminal_t *)ctx;
+
+  switch (c0) {
+  case '\n': // LF – move cursor down, preserve column position
+    t->cy++;
+    if (t->cy >= ROWS) {
+      scroll_buffer(t->screen);
+      t->cy = ROWS - 1;
+    }
+    break;
+  case '\r': // CR
+    t->cx = 0;
+    break;
+  case '\t': // HT
+    do {
+      t->cx++;
+    } while (t->cx < COLS && (t->cx % 8) != 0);
+    break;
+  case '\b': // BS
+    if (t->cx > 0)
+      t->cx--;
+    break;
+  case '\a': // BEL – ignore (no audio yet)
+  case '\v': // VT
+  case '\f': // FF
+  default:
+    break;
+  }
+}
+
+static void on_csi(int params[PARSER_MAX_PARAMS], int num_params,
+                   char intermediates[PARSER_MAX_INTERMEDIATES],
+                   int num_intermediates, char final, void *ctx) {
+  (void)intermediates;
+  (void)num_intermediates;
+  terminal_t *t = (terminal_t *)ctx;
+
+  // Helper to read a parameter with a default value.
+  // Parameter value of -1 means "omitted", use default.
+#define PARAM(n) ((n) < num_params && params[(n)] >= 0 ? params[(n)] : -1)
+
+  switch (final) {
+  case 'A': { // CUU – cursor up
+    int n = PARAM(0);
+    if (n < 0) n = 1;
+    t->cy -= n;
+    clamp_cursor(t);
+    break;
+  }
+  case 'B': { // CUD – cursor down
+    int n = PARAM(0);
+    if (n < 0) n = 1;
+    t->cy += n;
+    clamp_cursor(t);
+    break;
+  }
+  case 'C': { // CUF – cursor forward
+    int n = PARAM(0);
+    if (n < 0) n = 1;
+    t->cx += n;
+    clamp_cursor(t);
+    break;
+  }
+  case 'D': { // CUB – cursor back
+    int n = PARAM(0);
+    if (n < 0) n = 1;
+    t->cx -= n;
+    clamp_cursor(t);
+    break;
+  }
+  case 'H':   // CUP – cursor position
+  case 'f': { // HVP – horizontal vertical position
+    int row = PARAM(0);
+    int col = PARAM(1);
+    if (row < 0) row = 1;
+    if (col < 0) col = 1;
+    t->cy = row - 1;
+    t->cx = col - 1;
+    clamp_cursor(t);
+    break;
+  }
+  case 'J': { // ED – erase in display
+    int mode = PARAM(0);
+    if (mode < 0) mode = 0;
+    switch (mode) {
+    case 0: // erase from cursor to end of screen
+      clear_line(t->screen, t->cy, t->cx);
+      for (int r = t->cy + 1; r < ROWS; r++)
+        memset(t->screen[r], ' ', COLS);
+      break;
+    case 1: // erase from start to cursor
+      clear_line(t->screen, t->cy, 0);
+      for (int r = 0; r < t->cy; r++)
+        memset(t->screen[r], ' ', COLS);
+      // Don't erase the character at cursor
+      break;
+    case 2: // erase entire screen
+    case 3: // erase entire screen + scrollback (treat same as 2)
+      clear_screen(t->screen);
+      break;
+    }
+    break;
+  }
+  case 'K': { // EL – erase in line
+    int mode = PARAM(0);
+    if (mode < 0) mode = 0;
+    switch (mode) {
+    case 0: // erase from cursor to end of line
+      clear_line(t->screen, t->cy, t->cx);
+      break;
+    case 1: // erase from start of line to cursor
+      memset(t->screen[t->cy], ' ', (size_t)(t->cx + 1));
+      break;
+    case 2: // erase entire line
+      clear_line_all(t->screen, t->cy);
+      break;
+    }
+    break;
+  }
+  case 'm': // SGR – select graphic rendition (ignore attributes for now)
+    break;
+  case 's': // save cursor (SCP)
+    t->saved_cx = t->cx;
+    t->saved_cy = t->cy;
+    break;
+  case 'u': // restore cursor (RCP)
+    t->cx = t->saved_cx;
+    t->cy = t->saved_cy;
+    clamp_cursor(t);
+    break;
+  default:
+    break;
+  }
+
+#undef PARAM
+}
+
+static void on_esc(char intermediates[PARSER_MAX_INTERMEDIATES],
+                   int num_intermediates, char final, void *ctx) {
+  (void)intermediates;
+  terminal_t *t = (terminal_t *)ctx;
+
+  if (num_intermediates == 0) {
+    switch (final) {
+    case 'D': // IND – index (cursor down + scroll)
+      t->cy++;
+      if (t->cy >= ROWS) {
+        scroll_buffer(t->screen);
+        t->cy = ROWS - 1;
+      }
+      break;
+    case 'M': // RI – reverse index (cursor up + scroll)
+      t->cy--;
+      if (t->cy < 0) {
+        // Scroll the screen buffer down (insert blank line at top)
+        for (int r = ROWS - 1; r > 0; r--)
+          memcpy(t->screen[r], t->screen[r - 1], COLS);
+        memset(t->screen[0], ' ', COLS);
+        t->cy = 0;
+      }
+      break;
+    case 'E': // NEL – next line (CR + LF)
+      t->cx = 0;
+      t->cy++;
+      if (t->cy >= ROWS) {
+        scroll_buffer(t->screen);
+        t->cy = ROWS - 1;
+      }
+      break;
+    case '7': // DECSC – save cursor
+      t->saved_cx = t->cx;
+      t->saved_cy = t->cy;
+      break;
+    case '8': // DECRC – restore cursor
+      t->cx = t->saved_cx;
+      t->cy = t->saved_cy;
+      clamp_cursor(t);
+      break;
+    case 'c': // RIS – reset to initial state
+      clear_screen(t->screen);
+      t->cx = 0;
+      t->cy = 0;
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+static void on_osc(int command, const char *str, void *ctx) {
+  (void)command;
+  (void)str;
+  (void)ctx;
+  // OSC commands (e.g. set window title) – ignore for now.
+}
+
+static void on_dcs(int command, const char *str, void *ctx) {
+  (void)command;
+  (void)str;
+  (void)ctx;
+}
+
+static void on_string(const char *str, void *ctx) {
+  (void)str;
+  (void)ctx;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 int main(void) {
   InitWindow(800, 600, "dicTerm");
@@ -50,7 +325,10 @@ int main(void) {
     return 1;
   }
 
-  fcntl(master_fd, F_SETFL, O_NONBLOCK);
+  if (fcntl(master_fd, F_SETFL, O_NONBLOCK) == -1) {
+    perror("fcntl");
+    // Non-fatal; continue without non-blocking mode.
+  }
 
   if (pid == 0) {
     execl("/bin/bash", "bash", NULL);
@@ -60,11 +338,23 @@ int main(void) {
 
   SetTargetFPS(60);
 
-  char screen[ROWS][COLS];
+  // Initialise terminal state.
+  terminal_t term;
+  memset(&term, 0, sizeof(term));
   for (int r = 0; r < ROWS; r++)
-    memset(screen[r], ' ', COLS);
+    memset(term.screen[r], ' ', COLS);
 
-  int cx = 0, cy = 0;
+  // Set up parser callbacks.
+  parser_callbacks_t cbs = {
+      .on_print   = on_print,
+      .on_execute = on_execute,
+      .on_csi     = on_csi,
+      .on_esc     = on_esc,
+      .on_osc     = on_osc,
+      .on_dcs     = on_dcs,
+      .on_string  = on_string,
+  };
+  parser_init(&term.parser, &cbs, &term);
 
   while (!WindowShouldClose()) {
     fd_set readfds;
@@ -78,15 +368,14 @@ int main(void) {
     if (select(maxfd + 1, &readfds, NULL, NULL, &tv) == -1) {
       if (errno == EINTR)
         goto draw;
-
       perror("select");
       break;
     }
 
+    // Forward keyboard input to the child process.
     if (FD_ISSET(STDIN_FILENO, &readfds)) {
       char buf[4096];
       ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-
       if (n > 0) {
         ssize_t written = 0;
         while (written < n) {
@@ -102,45 +391,14 @@ int main(void) {
       }
     }
 
+    // Read PTY output and feed it into the escape-sequence parser.
     if (FD_ISSET(master_fd, &readfds)) {
-      char buf[4096];
+      char buf[65536];
       ssize_t n = read(master_fd, buf, sizeof(buf));
-
       if (n <= 0)
         break;
 
-      for (ssize_t i = 0; i < n; i++) {
-        char ch = buf[i];
-
-        if (ch == '\n') {
-          cx = 0;
-          cy++;
-          if (cy >= ROWS) {
-            scroll_buffer(screen);
-            cy = ROWS - 1;
-          }
-        } else if (ch == '\r') {
-          cx = 0;
-        } else if (ch == '\t') {
-          int next = ((cx / 8) + 1) * 8;
-          if (next < COLS)
-            cx = next;
-        } else if (ch == '\b') {
-          if (cx > 0)
-            cx--;
-        } else if (ch >= ' ') {
-          screen[cy][cx] = ch;
-          cx++;
-          if (cx >= COLS) {
-            cx = 0;
-            cy++;
-            if (cy >= ROWS) {
-              scroll_buffer(screen);
-              cy = ROWS - 1;
-            }
-          }
-        }
-      }
+      parser_feed(&term.parser, (const uint8_t *)buf, (size_t)n);
     }
 
 draw:
@@ -149,9 +407,10 @@ draw:
 
     for (int r = 0; r < ROWS; r++) {
       char line[COLS + 1];
-      memcpy(line, screen[r], COLS);
+      memcpy(line, term.screen[r], COLS);
       line[COLS] = '\0';
 
+      // Trim trailing spaces for display.
       int len = COLS;
       while (len > 0 && line[len - 1] == ' ')
         len--;
@@ -164,6 +423,5 @@ draw:
   }
 
   CloseWindow();
-
   return 0;
 }

@@ -10,9 +10,10 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c2y -Wall -Wextra -Werror -g")
 
 find_package(raylib REQUIRED)
 
-file(GLOB_RECURSE C_SOURCES CONFIGURE_DEPENDS src/*.c)
-
-add_executable(${PROJECT_NAME} ${C_SOURCES})
+# Main executable – exclude test files.
+file(GLOB_RECURSE ALL_C_SOURCES CONFIGURE_DEPENDS src/*.c)
+list(FILTER ALL_C_SOURCES EXCLUDE REGEX ".*test.*")
+add_executable(${PROJECT_NAME} ${ALL_C_SOURCES})
 
 target_include_directories(${PROJECT_NAME}
     PRIVATE
@@ -22,4 +23,14 @@ target_include_directories(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME}
     PRIVATE
         raylib
+)
+
+# Standalone test executable (no raylib dependency).
+add_executable(test_parser
+    src/parser.c
+    src/test_parser.c
+)
+target_include_directories(test_parser
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
 )
