@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
+#include <raylib.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -29,15 +30,17 @@ static void enable_raw_mode(void) {
 }
 
 int main(void) {
+  InitWindow(800, 600, "dicTerm");
   enable_raw_mode();
 
   int master_fd;
   pid_t pid = forkpty(&master_fd, NULL, NULL, NULL);
-
   if (pid == -1) {
     perror("forkpty");
     return 1;
   }
+
+  fcntl(master_fd, F_SETFL, O_NONBLOCK);
 
   if (pid == 0) {
     execl("/bin/bash", "bash", NULL);
@@ -45,7 +48,11 @@ int main(void) {
     _exit(1);
   }
 
-  while (true) {
+  SetTargetFPS(60);
+
+  while (!WindowShouldClose()) {
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
     fd_set readfds;
 
     FD_ZERO(&readfds);
@@ -54,9 +61,10 @@ int main(void) {
 
     int maxfd = (STDIN_FILENO > master_fd) ? STDIN_FILENO : master_fd;
 
-    if (select(maxfd + 1, &readfds, NULL, NULL, NULL) == -1) {
+    struct timeval tv = {0, 16000};
+    if (select(maxfd + 1, &readfds, NULL, NULL, &tv) == -1) {
       if (errno == EINTR)
-        continue;
+        goto draw;
 
       perror("select");
       break;
@@ -66,10 +74,19 @@ int main(void) {
       char buf[4096];
       ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
 
-      if (n <= 0)
-        break;
-
-      write(master_fd, buf, n);
+      if (n > 0) {
+        ssize_t written = 0;
+        while (written < n) {
+          ssize_t r = write(master_fd, buf + written, (size_t)(n - written));
+          if (r > 0) {
+            written += r;
+          } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+          } else {
+            break;
+          }
+        }
+      }
     }
 
     if (FD_ISSET(master_fd, &readfds)) {
@@ -79,9 +96,14 @@ int main(void) {
       if (n <= 0)
         break;
 
-      write(STDOUT_FILENO, buf, n);
+      DrawText(buf, 10, 10, 20, BLACK);
     }
+
+draw:
+    EndDrawing();
   }
+
+  CloseWindow();
 
   return 0;
 }
