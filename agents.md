@@ -6,14 +6,15 @@ that the orchestrator (primary agent) delegates work to.
 
 ## Agent roles
 
-| Agent | Type | Scope of work |
-|-------|------|--------------|
-| **orchestrator** | primary | Lead engineer. Breaks features into tasks, spawns subagents in parallel, merges results, runs tests, requests review. |
-| **ansi** | subagent | ANSI escape sequence parsing: CSI, OSC, SGR, cursor movement, terminal state. |
-| **font-renderer** | subagent | Font loading, glyph atlases, text shaping, glyph caching. |
-| **input** | subagent | Keyboard and mouse handling, clipboard, scrolling, shortcuts. |
-| **renderer** | subagent | GPU rendering: OpenGL/Vulkan, batching, vertex buffers, shaders. |
-| **reviewer** | subagent | Code review: bugs, race conditions, architecture, style, performance. Read-only (no edit permission). |
+| Agent | Type | Edit | Scope of work |
+|-------|------|------|--------------|
+| **orchestrator** | primary | ❌ | Lead engineer. Breaks features into tasks, spawns subagents in parallel, merges results, runs tests, requests review. Read-only — subagents write all code. |
+| **agent-creator** | subagent | ✅ | Creates and maintains opencode agent definition files (`.opencode/agents/*.md`). |
+| **ansi** | subagent | ✅ | ANSI escape sequence parsing: CSI, OSC, SGR, cursor movement, terminal state. |
+| **font-renderer** | subagent | ✅ | Font loading, glyph atlases, text shaping, glyph caching. |
+| **input** | subagent | ✅ | Keyboard and mouse handling, clipboard, scrolling, shortcuts. |
+| **renderer** | subagent | ✅ | GPU rendering: OpenGL/Vulkan, batching, vertex buffers, shaders. |
+| **reviewer** | subagent | ❌ | Code review: bugs, race conditions, architecture, style, performance. Read-only. |
 
 ## How agents work together
 
