@@ -12,9 +12,17 @@
 
 #include "input.h"
 #include "parser.h"
+#include "scrollback.h"
 
 #define ROWS 36
 #define COLS 100
+#define FONT_SIZE 20
+#define WIN_PADDING 10
+#define CHAR_WIDTH  10   // approximate character width at FONT_SIZE
+
+// Window dimensions derived from the terminal grid so all rows/cols are visible.
+#define WIN_WIDTH  (COLS * CHAR_WIDTH  + WIN_PADDING * 2)
+#define WIN_HEIGHT (ROWS * FONT_SIZE   + WIN_PADDING * 2)
 
 // ---------------------------------------------------------------------------
 // Terminal state
@@ -22,21 +30,31 @@
 
 typedef struct {
   char screen[ROWS][COLS];
-  int cx, cy;        // cursor position
-  int saved_cx, saved_cy; // saved cursor position (DECSC/DECRC)
+  int cx, cy;               // cursor position
+  int saved_cx, saved_cy;   // saved cursor position (DECSC/DECRC)
   parser_t parser;
+  scrollback_t *scrollback; // scrollback buffer
+  int scroll_offset;        // lines scrolled back (0 = normal view)
 } terminal_t;
 
+// ---------------------------------------------------------------------------
+// Min / max helpers
+// ---------------------------------------------------------------------------
 
+static int min_int(int a, int b) { return a < b ? a : b; }
+static int max_int(int a, int b) { return a > b ? a : b; }
 
 // ---------------------------------------------------------------------------
 // Screen helpers
 // ---------------------------------------------------------------------------
 
-static void scroll_buffer(char screen[ROWS][COLS]) {
+static void scroll_up(terminal_t *t) {
+  // Push the top line to scrollback before it scrolls off.
+  if (t->scrollback)
+    scrollback_push(t->scrollback, t->screen[0]);
   for (int i = 0; i < ROWS - 1; i++)
-    memcpy(screen[i], screen[i + 1], COLS);
-  memset(screen[ROWS - 1], ' ', COLS);
+    memcpy(t->screen[i], t->screen[i + 1], COLS);
+  memset(t->screen[ROWS - 1], ' ', COLS);
 }
 
 static void clear_screen(char screen[ROWS][COLS]) {
@@ -77,7 +95,7 @@ static void on_print(char ch, void *ctx) {
     t->cx = 0;
     t->cy++;
     if (t->cy >= ROWS) {
-      scroll_buffer(t->screen);
+      scroll_up(t);
       t->cy = ROWS - 1;
     }
   }
@@ -90,7 +108,7 @@ static void on_execute(char c0, void *ctx) {
   case '\n': // LF – move cursor down, preserve column position
     t->cy++;
     if (t->cy >= ROWS) {
-      scroll_buffer(t->screen);
+      scroll_up(t);
       t->cy = ROWS - 1;
     }
     break;
@@ -181,8 +199,12 @@ static void on_csi(int params[PARSER_MAX_PARAMS], int num_params,
       // Don't erase the character at cursor
       break;
     case 2: // erase entire screen
-    case 3: // erase entire screen + scrollback (treat same as 2)
       clear_screen(t->screen);
+      break;
+    case 3: // erase entire screen + scrollback
+      clear_screen(t->screen);
+      if (t->scrollback)
+        scrollback_clear(t->scrollback);
       break;
     }
     break;
@@ -231,7 +253,7 @@ static void on_esc(char intermediates[PARSER_MAX_INTERMEDIATES],
     case 'D': // IND – index (cursor down + scroll)
       t->cy++;
       if (t->cy >= ROWS) {
-        scroll_buffer(t->screen);
+        scroll_up(t);
         t->cy = ROWS - 1;
       }
       break;
@@ -249,7 +271,7 @@ static void on_esc(char intermediates[PARSER_MAX_INTERMEDIATES],
       t->cx = 0;
       t->cy++;
       if (t->cy >= ROWS) {
-        scroll_buffer(t->screen);
+        scroll_up(t);
         t->cy = ROWS - 1;
       }
       break;
@@ -264,6 +286,8 @@ static void on_esc(char intermediates[PARSER_MAX_INTERMEDIATES],
       break;
     case 'c': // RIS – reset to initial state
       clear_screen(t->screen);
+      if (t->scrollback)
+        scrollback_reset(t->scrollback);
       t->cx = 0;
       t->cy = 0;
       break;
@@ -292,11 +316,67 @@ static void on_string(const char *str, void *ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// Scroll key handling
+// ---------------------------------------------------------------------------
+
+/**
+ * Check for and handle scroll-back keys using raylib's IsKeyPressed().
+ * IsKeyPressed does NOT consume events from the GetKeyPressed queue, so
+ * process_keyboard_input will still see these keys – we must skip them there.
+ * Returns true if any scroll action was taken.
+ */
+static bool handle_scroll_keys(terminal_t *t) {
+  if (!t)
+    return false;
+
+  bool scrolled = false;
+  int sb_count = scrollback_count(t->scrollback);
+
+  // Page Up   – scroll up one full screen (capped at available history)
+  if (IsKeyPressed(KEY_PAGE_UP)) {
+    t->scroll_offset = min_int(t->scroll_offset + ROWS, sb_count);
+    scrolled = true;
+  }
+
+  // Page Down – scroll down one full screen
+  if (IsKeyPressed(KEY_PAGE_DOWN)) {
+    t->scroll_offset = max_int(0, t->scroll_offset - ROWS);
+    scrolled = true;
+  }
+
+  // Shift + Up   – scroll up one line
+  if (IsKeyPressed(KEY_UP) &&
+      (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))) {
+    t->scroll_offset = min_int(t->scroll_offset + 1, sb_count);
+    scrolled = true;
+  }
+
+  // Shift + Down – scroll down one line
+  if (IsKeyPressed(KEY_DOWN) &&
+      (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))) {
+    t->scroll_offset = max_int(0, t->scroll_offset - 1);
+    scrolled = true;
+  }
+
+  // Mouse wheel
+  float wheel = GetMouseWheelMove();
+  if (wheel > 0) {
+    t->scroll_offset = min_int(t->scroll_offset + (int)wheel, sb_count);
+    scrolled = true;
+  } else if (wheel < 0) {
+    t->scroll_offset = max_int(0, t->scroll_offset + (int)wheel);
+    scrolled = true;
+  }
+
+  return scrolled;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 int main(void) {
-  InitWindow(800, 600, "dicTerm");
+  InitWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm");
 
   int master_fd;
   pid_t pid = forkpty(&master_fd, NULL, NULL, NULL);
@@ -323,6 +403,10 @@ int main(void) {
   memset(&term, 0, sizeof(term));
   for (int r = 0; r < ROWS; r++)
     memset(term.screen[r], ' ', COLS);
+
+  // Create scrollback buffer.
+  term.scrollback = scrollback_create(SCROLLBACK_CAPACITY, COLS);
+  term.scroll_offset = 0;
 
   // Set up parser callbacks.
   parser_callbacks_t cbs = {
@@ -357,19 +441,45 @@ int main(void) {
       }
     }
 
+    // Handle scroll-back keys (uses IsKeyPressed – does not consume events).
+    handle_scroll_keys(&term);
+
     // Process raylib keyboard input and forward to the child.
-    if (process_keyboard_input(master_fd) < 0) {
+    // Scroll keys (PAGE_UP, PAGE_DOWN, Shift+UP, Shift+DOWN) are skipped
+    // internally by process_keyboard_input and are NOT forwarded to the PTY.
+    // If any bytes were forwarded (written > 0), the user pressed a non-scroll
+    // key, so we reset the scroll offset back to normal view.
+    int written = process_keyboard_input(master_fd);
+    if (written < 0) {
       perror("write(master_fd)");
       // Non-fatal; keep running.
+    } else if (written > 0 && term.scroll_offset > 0) {
+      term.scroll_offset = 0;
     }
 
     BeginDrawing();
     ClearBackground(RAYWHITE);
 
+    // Number of scrollback lines visible at the top of the viewport.
+    int sb_count = scrollback_count(term.scrollback);
+    int sb_visible = min_int(term.scroll_offset, sb_count);
+
     for (int r = 0; r < ROWS; r++) {
       char line[COLS + 1];
-      memcpy(line, term.screen[r], COLS);
+      memset(line, ' ', COLS);
       line[COLS] = '\0';
+
+      if (r < sb_visible) {
+        // Show a line from the scrollback buffer.
+        // The most recent scrollback lines appear closest to the active screen.
+        int sb_index = sb_visible - 1 - r;
+        scrollback_get(term.scrollback, sb_index, line, COLS);
+      } else {
+        // Show a line from the active screen buffer.
+        int screen_row = r - sb_visible;
+        if (screen_row >= 0 && screen_row < ROWS)
+          memcpy(line, term.screen[screen_row], COLS);
+      }
 
       // Trim trailing spaces for display.
       int len = COLS;
@@ -377,13 +487,21 @@ int main(void) {
         len--;
       line[len] = '\0';
 
-      DrawText(line, 10, 10 + r * 20, 20, BLACK);
+      DrawText(line, WIN_PADDING, WIN_PADDING + r * FONT_SIZE, FONT_SIZE, BLACK);
+    }
+
+    // Draw scroll indicator in top-right corner (if scrolled back).
+    if (sb_visible > 0) {
+      char indicator[32];
+      snprintf(indicator, sizeof(indicator), "(-%d)", sb_visible);
+      DrawText(indicator, WIN_WIDTH - 100, WIN_PADDING, FONT_SIZE, GRAY);
     }
 
     EndDrawing();
   }
 
 done:
+  scrollback_destroy(term.scrollback);
   CloseWindow();
   return 0;
 }

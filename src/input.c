@@ -311,6 +311,11 @@ int process_keyboard_input(int fd) {
     ctrl_held  = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     alt_held   = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
 
+    // Scroll keys are handled locally in main.c – do NOT forward to PTY.
+    if (key == KEY_PAGE_UP || key == KEY_PAGE_DOWN ||
+        ((key == KEY_UP || key == KEY_DOWN) && shift_held))
+      continue;
+
     int len = key_to_seq(key, shift_held, ctrl_held, alt_held, seq);
     if (len > 0) {
       if (write_all(fd, seq, len) < 0) return -1;
