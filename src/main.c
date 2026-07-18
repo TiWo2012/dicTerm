@@ -46,6 +46,7 @@ typedef struct {
 
   parser_t      parser;
   scrollback_t *scrollback;
+  int           scroll_offset;   // 0 = normal view, > 0 = scrolled back into history
   font_handle_t *font;
   int           win_width;
   int           win_height;
@@ -96,7 +97,7 @@ static const uint8_t default_bg[3] = {  0,   0,   0};
 /// @param count  Number of rows to scroll up.
 static void scroll_up(terminal_t *t, int count) {
   int cols = t->screen.cols;
-  char line_buf[COLS];
+  char line_buf[COLS] = {0};
   for (int n = 0; n < count; n++) {
     // Copy the top row's characters into a plain buffer for scrollback
     for (int c = 0; c < COLS && c < cols; c++)
@@ -144,6 +145,51 @@ static void scroll_down(terminal_t *t, int count) {
 }
 
 // ---------------------------------------------------------------------------
+// Scrollback viewport handling
+// ---------------------------------------------------------------------------
+
+/// @brief Handle scrollback navigation keys.
+///
+/// When the viewport is scrolled back, the user can navigate with:
+///   - Page Up:    scroll up by one page (screen height)
+///   - Page Down:  scroll down by one page
+///   - Shift+Up:   scroll up by one line
+///   - Shift+Down: scroll down by one line
+///
+/// Page Up / Page Down are reserved in input.c (not forwarded to the PTY)
+/// so they are safe to use here.  Shift+Up / Shift+Down are also reserved.
+///
+/// @param t  Terminal state.
+static void handle_scrollback_keys(terminal_t *t) {
+  int max_offset = scrollback_count(t->scrollback);
+
+  if (IsKeyPressed(KEY_PAGE_UP)) {
+    t->scroll_offset += t->screen.rows;
+    if (t->scroll_offset > max_offset)
+      t->scroll_offset = max_offset;
+  }
+  if (IsKeyPressed(KEY_PAGE_DOWN)) {
+    t->scroll_offset -= t->screen.rows;
+    if (t->scroll_offset < 0)
+      t->scroll_offset = 0;
+  }
+
+  bool shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+  if (shift_held) {
+    if (IsKeyPressed(KEY_UP)) {
+      t->scroll_offset++;
+      if (t->scroll_offset > max_offset)
+        t->scroll_offset = max_offset;
+    }
+    if (IsKeyPressed(KEY_DOWN)) {
+      t->scroll_offset--;
+      if (t->scroll_offset < 0)
+        t->scroll_offset = 0;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Screen helpers
 // ---------------------------------------------------------------------------
 
@@ -157,6 +203,7 @@ static void clear_screen(terminal_t *t) {
   for (int r = 0; r < t->screen.rows; r++)
     screen_buf_clear_row(&t->screen, r, true);
   scrollback_clear(t->scrollback);
+  t->scroll_offset = 0;
   t->cx = 0;
   t->cy = 0;
 }
@@ -778,6 +825,11 @@ int main(void) {
 
   // ---- Main loop ----
   while (!WindowShouldClose()) {
+    // Capture scrollback total before draining PTY, so we can detect
+    // how many new lines were pushed and adjust the viewport offset
+    // to keep the user's scroll position stable.
+    int sb_total_before = scrollback_total_pushed(term.scrollback);
+
     // Drain PTY output
     for (;;) {
       char buf[65536];
@@ -793,8 +845,32 @@ int main(void) {
       }
     }
 
+    // If new lines were pushed to the scrollback while we were in
+    // scrollback mode, adjust the offset so the viewport stays
+    // pointing at the same logical content.
+    if (term.scroll_offset > 0) {
+      int sb_total_after = scrollback_total_pushed(term.scrollback);
+      int new_pushes = sb_total_after - sb_total_before;
+      if (new_pushes > 0) {
+        term.scroll_offset += new_pushes;
+        int max_offset = scrollback_count(term.scrollback);
+        if (term.scroll_offset > max_offset)
+          term.scroll_offset = max_offset;
+      }
+    }
+
+    // Handle scrollback navigation keys (PageUp/Down, Shift+Up/Down)
+    // This must run BEFORE process_keyboard_input because it uses IsKeyPressed
+    // which does not consume events from GetKeyPressed().
+    handle_scrollback_keys(&term);
+
     // Keyboard input → PTY
-    process_keyboard_input(master_fd);
+    int written = process_keyboard_input(master_fd);
+
+    // If any regular key was sent to the PTY while in scrollback mode,
+    // exit scrollback mode (return to normal terminal view).
+    if (written > 0 && term.scroll_offset > 0)
+      term.scroll_offset = 0;
 
     // Window resize → PTY
     int new_w = GetScreenWidth();
@@ -832,28 +908,98 @@ int main(void) {
     BeginDrawing();
     ClearBackground((Color){ 15, 20, 25, 255 });
 
-    for (int r = 0; r < term.screen.rows; r++) {
-      float y = (float)WIN_PADDING + (float)r * char_h;
-      for (int c = 0; c < term.screen.cols; c++) {
-        const screen_cell_t *cell = &term.screen.cells[r * term.screen.cols + c];
-        float x = (float)WIN_PADDING + (float)c * char_w;
-        render_cell(term.font, cell, x, y, char_w, char_h);
+    int screen_rows = term.screen.rows;
+    int sb_count = scrollback_count(term.scrollback);
+
+    if (term.scroll_offset > 0) {
+      // ── Scrollback (viewport) mode ──────────────────────────────
+      // The viewport is shifted up by scroll_offset lines.
+      // Top portion: scrollback lines (old history).
+      // Bottom portion: the current visible screen (shifted up).
+      char line[COLS];
+      for (int r = 0; r < screen_rows; r++) {
+        float y = (float)WIN_PADDING + (float)r * char_h;
+
+        // Index into the scrollback buffer for this row.
+        // When r=0 we show the oldest scrollback line of the viewport.
+        // When r=scroll_offset-1 we show the newest scrollback line.
+        int sb_idx = term.scroll_offset - 1 - r;
+
+        if (sb_idx >= 0 && sb_idx < sb_count) {
+          // Render from scrollback buffer (char-only, default colours)
+          if (scrollback_get(term.scrollback, sb_idx, line, COLS)) {
+            for (int c = 0; c < term.screen.cols; c++) {
+              float x = (float)WIN_PADDING + (float)c * char_w;
+              screen_cell_t sc;
+              sc.ch = (uint8_t)line[c];
+              sc.fg[0] = default_fg[0]; sc.fg[1] = default_fg[1];
+              sc.fg[2] = default_fg[2];
+              sc.bg[0] = default_bg[0]; sc.bg[1] = default_bg[1];
+              sc.bg[2] = default_bg[2];
+              sc.bold = 0;
+              sc.underline = 0;
+              render_cell(term.font, &sc, x, y, char_w, char_h);
+            }
+          }
+        } else {
+          // Scrollback lines exhausted – show the corresponding screen line
+          int screen_row = r - term.scroll_offset;
+          if (screen_row >= 0 && screen_row < term.screen.rows) {
+            for (int c = 0; c < term.screen.cols; c++) {
+              float x = (float)WIN_PADDING + (float)c * char_w;
+              const screen_cell_t *cell =
+                &term.screen.cells[screen_row * term.screen.cols + c];
+              render_cell(term.font, cell, x, y, char_w, char_h);
+            }
+          }
+          // If screen_row is also out of range, the row is left blank.
+        }
       }
-    }
 
-    // Cursor: inverted block
-    {
-      float cx = (float)WIN_PADDING + (float)term.cx * char_w;
-      float cy = (float)WIN_PADDING + (float)term.cy * char_h;
-      DrawRectangle((int)cx, (int)cy, (int)char_w, (int)char_h,
-                    (Color){ 220, 220, 220, 180 });
+      // Scrollback indicator bar at the bottom
+      {
+        int indicator_y = WIN_PADDING + screen_rows * (int)char_h;
+        if (indicator_y + 2 < term.win_height) {
+          // Semi-transparent bar
+          DrawRectangle(0, indicator_y, term.win_width, 20,
+                        (Color){ 30, 40, 60, 220 });
 
-      int cp = term.screen.cells[term.cy * term.screen.cols + term.cx].ch;
-      if (cp < 0x20) cp = ' ';
-      DrawTextCodepoints(*font->current, &cp, 1,
-                         (Vector2){ cx, cy + font->ascent },
-                         font->font_size, font->spacing,
-                         (Color){ 15, 20, 25, 255 });
+          char indicator[64];
+          int len = snprintf(indicator, sizeof(indicator),
+                             " -- Scrollback (%d/%d) --",
+                             term.scroll_offset, sb_count);
+          // Simple bitmap-font rendering using DrawText (raylib default font)
+          DrawText(indicator, WIN_PADDING, indicator_y + 2, 14,
+                   (Color){ 180, 200, 230, 255 });
+          (void)len;
+        }
+      }
+    } else {
+      // ── Normal terminal mode ────────────────────────────────────
+      for (int r = 0; r < term.screen.rows; r++) {
+        float y = (float)WIN_PADDING + (float)r * char_h;
+        for (int c = 0; c < term.screen.cols; c++) {
+          const screen_cell_t *cell =
+            &term.screen.cells[r * term.screen.cols + c];
+          float x = (float)WIN_PADDING + (float)c * char_w;
+          render_cell(term.font, cell, x, y, char_w, char_h);
+        }
+      }
+
+      // Cursor: inverted block (only in normal mode)
+      {
+        float cx = (float)WIN_PADDING + (float)term.cx * char_w;
+        float cy = (float)WIN_PADDING + (float)term.cy * char_h;
+        DrawRectangle((int)cx, (int)cy, (int)char_w, (int)char_h,
+                      (Color){ 220, 220, 220, 180 });
+
+        int cp = term.screen.cells[term.cy * term.screen.cols + term.cx].ch;
+        if (cp < 0x20) cp = ' ';
+        DrawTextCodepoints(*font->current, &cp, 1,
+                           (Vector2){ cx, cy + font->ascent },
+                           font->font_size, font->spacing,
+                           (Color){ 15, 20, 25, 255 });
+      }
     }
 
     EndDrawing();

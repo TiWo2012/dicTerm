@@ -8,7 +8,8 @@ Early development – a minimal terminal that spawns a child shell, renders its
 output to a raylib window, and forwards keyboard input.  ANSI SGR colour
 attributes (foreground, background, bold, underline) with full 24-bit RGB and
 256-colour palette support are implemented.  Font rendering with Nerd Fonts
-is functional; richer terminal features are on the roadmap.
+is functional.  Scrollback history viewing with viewport navigation is
+implemented.  Richer terminal features are on the roadmap.
 
 ## Dependencies
 
@@ -54,6 +55,22 @@ Opens a window running `/bin/bash` inside a pseudo-terminal.  Type normally;
 the shell output is rendered in the raylib window using the GPU-accelerated
 font atlas.  Close the window or type `exit` to quit.
 
+### Scrollback (history) navigation
+
+The terminal stores lines that scroll off the top of the screen in a ring
+buffer (default 1000 lines).  You can navigate the history with:
+
+| Key | Action |
+|-----|--------|
+| `Page Up`   | Scroll up one page (36 lines) |
+| `Page Down` | Scroll down one page |
+| `Shift` + `↑` | Scroll up one line |
+| `Shift` + `↓` | Scroll down one line |
+
+While browsing history, a "`-- Scrollback (offset/count) --`" indicator is
+shown at the bottom of the window.  Press any regular key (letter, Enter,
+Ctrl+C, etc.) to return to the normal terminal view.
+
 ### Nerd Fonts
 
 If a Nerd Fonts variant is installed on the system it will be detected
@@ -73,14 +90,14 @@ switch between standard and Nerd Fonts at runtime via the API.
 │   ├── scrollback.h        # Scrollback ring buffer
 │   └── screen.h            # Screen cell with SGR colour attributes
 ├── src/
-│   ├── main.c              # Terminal emulator: PTY, screen buffer, SGR callbacks
+│   ├── main.c              # Terminal emulator: PTY, screen buffer, SGR callbacks, scrollback viewport
 │   ├── parser.c            # ANSI escape sequence state machine
 │   ├── font.c              # TrueType font loader, glyph atlas, Nerd Fonts PUA
 │   ├── input.c             # Keyboard handling
 │   ├── scrollback.c        # Line-based ring buffer
 │   ├── screen.c            # Screen grid buffer (per-cell fg/bg colours)
 │   ├── test_parser.c       # 46 unit tests (parser, incl. colon sub-params)
-│   ├── test_scrollback.c   # 9 unit tests (scrollback)
+│   ├── test_scrollback.c   # 18 unit tests (scrollback ring buffer + viewport indexing)
 │   ├── test_screen.c       # 6 unit tests (screen buffer ops)
 │   └── test_ansi_colors.c  # 32 unit tests (SGR colour parsing)
 └── .opencode/
@@ -155,6 +172,9 @@ switch between standard and Nerd Fonts at runtime via the API.
 ### Terminal emulation (`main.c`)
 - ForkPTY child process (bash)
 - Screen buffer (36 × 100 cells) with per-cell SGR colour attributes
+- **Scrollback viewport**: browse historical output with Page Up/Down and
+  Shift+Up/Down; viewport stays stable when new output arrives; cursor
+  hidden in history mode; scrollback indicator bar
 - **C0 controls**: LF, CR, BS, HT, VT, FF
 - **CSI cursor movement**: CUU, CUD, CUF, CUB, CUP, HVP
 - **CSI erase**: ED (clear display), EL (clear line)
@@ -177,14 +197,17 @@ switch between standard and Nerd Fonts at runtime via the API.
 ### Scrollback buffer (`scrollback.c` / `scrollback.h`)
 - Fixed-capacity ring buffer (default 1000 lines)
 - Push, indexed lookup, clear, reset operations
-- 9 unit tests with 100% pass rate
+- Fully integrated with `main.c`: lines are pushed automatically as they
+  scroll off the top of the screen; the viewport can navigate the history
+  and stays stable when new output arrives
+- 18 unit tests with 100% pass rate
 
 ## Roadmap
 
 - [x] Font rendering (glyph atlas, TrueType via raylib, Nerd Fonts support)
 - [x] SGR colour attributes (standard/bright/extended foreground, background, bold, underline)
 - [x] 256-colour palette and 24-bit truecolor RGB support
-- [ ] Scrollback buffer integration with viewport scrolling
+- [x] Scrollback buffer integration with viewport scrolling
 - [ ] Mouse support
 - [ ] Clipboard integration
 - [ ] Configuration file
