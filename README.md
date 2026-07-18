@@ -6,14 +6,16 @@ A GPU-accelerated terminal emulator built with [raylib](https://www.raylib.com/)
 
 Early development – a minimal terminal that spawns a child shell, renders its
 output to a raylib window, and forwards keyboard input.  ANSI escape sequence
-parsing is functional; font rendering and rich terminal features are on the
-roadmap.
+parsing and font rendering with Nerd Fonts support are functional; richer
+terminal features are on the roadmap.
 
 ## Dependencies
 
 - **clang** 16+ (C23 / `-std=c2y`)
 - **cmake** 3.20+
-- **raylib** (system-installed; tested with 5.x)
+- **raylib** (system-installed; tested with 5.x / 6.x)
+- **TrueType/OpenType font** (monospace recommended, e.g. JetBrains Mono, Fira Code, DejaVu Sans Mono)
+- **Nerd Fonts** (optional, automatically detected for icon/powerline glyphs)
 
 ## Build
 
@@ -35,6 +37,7 @@ Tests can always be run manually or via CTest regardless of build type:
 
 ```bash
 build/test_parser                 # direct
+build/test_scrollback             # direct
 ctest --test-dir build            # via CTest
 ```
 
@@ -45,19 +48,33 @@ ctest --test-dir build            # via CTest
 ```
 
 Opens a window running `/bin/bash` inside a pseudo-terminal.  Type normally;
-the shell output is rendered in the raylib window.  Close the window or type
-`exit` to quit.
+the shell output is rendered in the raylib window using the GPU-accelerated
+font atlas.  Close the window or type `exit` to quit.
+
+### Nerd Fonts
+
+If a Nerd Fonts variant is installed on the system it will be detected
+automatically. The terminal then has access to Nerd Font icons, powerline
+symbols, and other glyphs in the Private Use Area (PUA) ranges.  You can
+switch between standard and Nerd Fonts at runtime via the API.
 
 ## Project structure
 
 ```
-├── CMakeLists.txt          # Build: dicTerm + test_parser
+├── CMakeLists.txt          # Build: dicTerm + test_parser + test_scrollback
 ├── include/
-│   └── parser.h            # ECMA-48 escape sequence parser API
+│   ├── parser.h            # ECMA-48 escape sequence parser API
+│   ├── font.h              # Font rendering subsystem (glyph atlas + Nerd Fonts)
+│   ├── input.h             # Keyboard input → PTY sequence converter
+│   └── scrollback.h        # Scrollback ring buffer
 ├── src/
 │   ├── main.c              # Terminal emulator: PTY, screen buffer, callbacks
 │   ├── parser.c            # ANSI escape sequence state machine
-│   └── test_parser.c       # 45 unit tests
+│   ├── font.c              # TrueType font loader, glyph atlas, Nerd Fonts PUA
+│   ├── input.c             # Keyboard handling
+│   ├── scrollback.c        # Line-based ring buffer
+│   ├── test_parser.c       # 45 unit tests (parser)
+│   └── test_scrollback.c   # 9 unit tests (scrollback)
 └── .opencode/
     ├── agents/             # Agent definitions
     └── package.json        # opencode configuration
@@ -66,30 +83,58 @@ the shell output is rendered in the raylib window.  Close the window or type
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────┐
-│                    raylib window                      │
-│  ┌─────────────────────────────────────────────────┐  │
-│  │              DrawText(screen[r])                │  │
-│  └─────────────────────────────────────────────────┘  │
-└───────────────────────┬───────────────────────────────┘
-                        │
-┌───────────────────────▼───────────────────────────────┐
-│                   main.c                              │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  PTY master  │  │  screen[][] │  │  parser_t    │  │
-│  │  (forkpty)   │──│  + cx,cy    │──│  (callbacks) │  │
-│  └──────┬──────┘  └──────────────┘  └──────┬───────┘  │
-│         │  keyboard input                  │          │
-└─────────┼──────────────────────────────────┼──────────┘
-          │  PTY output                      │ parser_feed
-          ▼                                  ▼
-     ┌──────────┐                    ┌──────────────┐
-     │  bash    │                    │  parser.c    │
-     │  (child) │                    │  state machine│
-     └──────────┘                    └──────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                     raylib window                          │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │      DrawTextCodepoints(font, codepoints, ...)       │  │
+│  │      with glyph atlas from font subsystem            │  │
+│  └──────────────────────────────────────────────────────┘  │
+└────────────────────────┬──────────────────────────────────┘
+                         │
+┌────────────────────────▼──────────────────────────────────┐
+│                       main.c                              │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │  PTY master  │  │  screen[][] │  │  parser_t    │     │
+│  │  (forkpty)   │──│  + cx,cy    │──│  (callbacks) │     │
+│  └──────┬──────┘  └──────┬───────┘  └──────┬───────┘     │
+│         │                │                 │             │
+│         │        ┌───────▼────────┐        │             │
+│         │        │  font_handle_t │        │             │
+│         │        │  (glyph cache, │        │             │
+│         │        │   Font atlas,  │        │             │
+│         │        │   Nerd switch) │        │             │
+│         │        └───────▲────────┘        │             │
+│         │  keyboard      │                 │ parser_feed │
+│         │  input         │                 │             │
+└─────────┼────────────────┼─────────────────┼─────────────┘
+          │                │                 │
+          ▼                │                 ▼
+     ┌──────────┐          │          ┌──────────────┐
+     │  bash    │          │          │  parser.c    │
+     │  (child) │          │          │  state machine│
+     └──────────┘          │          └──────────────┘
+                           ▼
+                    ┌──────────────┐
+                    │  font.c      │
+                    │  LoadFontEx  │
+                    │  DrawText-   │
+                    │  Codepoints  │
+                    │  Nerd PUA    │
+                    └──────────────┘
 ```
 
 ## What's implemented
+
+### Font rendering (`font.c` / `font.h`)
+- TrueType/OpenType font loading via `LoadFontEx` with codepoint range
+- Glyph atlas caching with raylib's built-in texture management
+- Nerd Fonts auto-detection from common system paths (TTF/OTF subdirectories)
+- PUA codepoint ranges for Nerd Font icons (powerline, devicons, Font Awesome, Material Design, misc symbols)
+- Hot-swappable font selection: `font_select(handle, "nerd")` / `"regular"`
+- `DrawTextCodepoints` for fixed-width terminal rendering
+- Glyph index cache for O(1) codepoint → glyph lookups
+- Sub-pixel positioning with proper ascent/descent metrics
+- Font discovery: automatic search for monospace + Nerd Fonts on the system
 
 ### ANSI escape sequence parser (`parser.c`)
 - Full ECMA-48 state machine: GROUND, ESC, CSI, OSC, DCS, SOS/PM/APC
@@ -102,18 +147,26 @@ the shell output is rendered in the raylib window.  Close the window or type
 ### Terminal emulation (`main.c`)
 - ForkPTY child process (bash)
 - Screen buffer (36 × 100 chars) with scrolling
-- **C0 controls**: LF, CR, BS, HT
+- **C0 controls**: LF, CR, BS, HT, VT, FF
 - **CSI cursor movement**: CUU, CUD, CUF, CUB, CUP, HVP
 - **CSI erase**: ED (clear display), EL (clear line)
-- **CSI SGR** (select graphic rendition) – parsed, attributes not yet rendered
 - **CSI save/restore cursor**: `s` / `u`
 - **ESC sequences**: IND, RI, NEL, DECSC, DECRC, RIS
+- Keyboard input via `input.c` with modifier support (Ctrl, Alt, Shift)
+- Cursor drawn as inverted block
+- Window resizing with PTY resize notification
+- Non-blocking PTY I/O
+
+### Scrollback buffer (`scrollback.c` / `scrollback.h`)
+- Fixed-capacity ring buffer (default 1000 lines)
+- Push, indexed lookup, clear, reset operations
+- 9 unit tests with 100% pass rate
 
 ## Roadmap
 
-- [ ] Font rendering (glyph atlas, TrueType via raylib)
+- [x] Font rendering (glyph atlas, TrueType via raylib, Nerd Fonts support)
 - [ ] SGR attributes (bold, italic, colors)
-- [ ] Scrollback buffer
+- [ ] Scrollback buffer integration with viewport scrolling
 - [ ] Mouse support
 - [ ] Clipboard integration
 - [ ] Configuration file
