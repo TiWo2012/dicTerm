@@ -25,10 +25,7 @@ target_link_libraries(${PROJECT_NAME}
         raylib
 )
 
-# Scrollback module (used by the main executable via src/main.c).
-# Already compiled into the main executable via the GLOB_RECURSE above.
-
-# Standalone test executables (no raylib dependency).
+# Scrollback test (no raylib dependency).
 add_executable(test_parser
     src/parser.c
     src/test_parser.c
@@ -47,12 +44,35 @@ target_include_directories(test_scrollback
         ${CMAKE_SOURCE_DIR}/include
 )
 
+# Screen buffer tests (no raylib dependency).
+add_executable(test_screen
+    src/screen.c
+    src/test_screen.c
+)
+target_include_directories(test_screen
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+)
+
+# ANSI colour / SGR tests (no raylib dependency – tests the parser
+# integration with SGR colour codes).
+add_executable(test_ansi_colors
+    src/parser.c
+    src/test_ansi_colors.c
+)
+target_include_directories(test_ansi_colors
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+)
+
 # Register with CTest.
 enable_testing()
 add_test(NAME test_parser COMMAND test_parser)
 add_test(NAME test_scrollback COMMAND test_scrollback)
+add_test(NAME test_screen COMMAND test_screen)
+add_test(NAME test_ansi_colors COMMAND test_ansi_colors)
 
-# Auto-run tests in Debug builds: tests must pass before the build completes.
+# Auto-run tests in Debug builds.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_custom_command(TARGET test_parser POST_BUILD
         COMMAND $<TARGET_FILE:test_parser>
@@ -64,6 +84,15 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         COMMENT "Running scrollback unit tests..."
         USES_TERMINAL
     )
-    # Ensure the main target cannot succeed unless tests pass.
-    add_dependencies(${PROJECT_NAME} test_parser test_scrollback)
+    add_custom_command(TARGET test_screen POST_BUILD
+        COMMAND $<TARGET_FILE:test_screen>
+        COMMENT "Running screen buffer unit tests..."
+        USES_TERMINAL
+    )
+    add_custom_command(TARGET test_ansi_colors POST_BUILD
+        COMMAND $<TARGET_FILE:test_ansi_colors>
+        COMMENT "Running ANSI colour tests..."
+        USES_TERMINAL
+    )
+    add_dependencies(${PROJECT_NAME} test_parser test_scrollback test_screen test_ansi_colors)
 endif()

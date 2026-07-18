@@ -2,7 +2,7 @@
 description: Coordinates implementation by delegating work to specialists.
 mode: primary
 permission:
-  edit: deny
+  edit: allow
   bash: allow
   task:
     "*": deny
