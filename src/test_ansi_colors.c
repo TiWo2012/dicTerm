@@ -326,6 +326,93 @@ static void test_8bit_csi(void) {
   check_csi("8-bit CSI SGR", "\x9B" "31m", expected, 1, 'm');
 }
 
+// ---- Extended colour (256-colour and truecolor) tests ----
+
+static void test_extended_fg_256(void) {
+  // ESC[38;5;10m – set fg to 256-colour index 10 (bright green)
+  int expected[] = {38, 5, 10};
+  check_csi("ext fg 256", "\x1B[38;5;10m", expected, 3, 'm');
+}
+
+static void test_extended_fg_truecolor(void) {
+  // ESC[38;2;100;200;250m – set fg to RGB(100,200,250)
+  int expected[] = {38, 2, 100, 200, 250};
+  check_csi("ext fg truecolor", "\x1B[38;2;100;200;250m", expected, 5, 'm');
+}
+
+static void test_extended_bg_256(void) {
+  // ESC[48;5;20m – set bg to 256-colour index 20
+  int expected[] = {48, 5, 20};
+  check_csi("ext bg 256", "\x1B[48;5;20m", expected, 3, 'm');
+}
+
+static void test_extended_bg_truecolor(void) {
+  // ESC[48;2;10;20;30m – set bg to RGB(10,20,30)
+  int expected[] = {48, 2, 10, 20, 30};
+  check_csi("ext bg truecolor", "\x1B[48;2;10;20;30m", expected, 5, 'm');
+}
+
+static void test_sgr_default_fg(void) {
+  // ESC[39m – reset foreground to default
+  int expected[] = {39};
+  check_csi("default fg", "\x1B[39m", expected, 1, 'm');
+}
+
+static void test_sgr_default_bg(void) {
+  // ESC[49m – reset background to default
+  int expected[] = {49};
+  check_csi("default bg", "\x1B[49m", expected, 1, 'm');
+}
+
+static void test_extended_then_bold(void) {
+  // ESC[38;5;10;1m – set fg to 256-colour 10, then bold
+  int expected[] = {38, 5, 10, 1};
+  check_csi("ext fg + bold", "\x1B[38;5;10;1m", expected, 4, 'm');
+}
+
+static void test_colon_subparam_256(void) {
+  // ESC[38:5:10m – colon-separated 256-colour (sub-parameter syntax)
+  int expected[] = {38, 5, 10};
+  check_csi("colon 256", "\x1B[38:5:10m", expected, 3, 'm');
+}
+
+static void test_colon_subparam_truecolor(void) {
+  // ESC[38:2:100:200:250m – colon-separated truecolor
+  int expected[] = {38, 2, 100, 200, 250};
+  check_csi("colon truecolor", "\x1B[38:2:100:200:250m", expected, 5, 'm');
+}
+
+static void test_mixed_semicolon_colon(void) {
+  // ESC[38;5;10:1m – mixed semi/colon (should treat both as separators)
+  // parser: 38 ';' 5 ';' 10 ':' 1 'm' → params [38,5,10,1]
+  int expected[] = {38, 5, 10, 1};
+  check_csi("mixed separator", "\x1B[38;5;10:1m", expected, 4, 'm');
+}
+
+static void test_underline_color(void) {
+  // ESC[58;5;100m – underline colour (code 58, 256-colour)
+  int expected[] = {58, 5, 100};
+  check_csi("underline 256", "\x1B[58;5;100m", expected, 3, 'm');
+}
+
+// ---- Colour-index edge cases ----
+
+static void test_256_color_0(void) {
+  int expected[] = {38, 5, 0};
+  check_csi("256 index 0", "\x1B[38;5;0m", expected, 3, 'm');
+}
+
+static void test_256_color_255(void) {
+  int expected[] = {38, 5, 255};
+  check_csi("256 index 255", "\x1B[38;5;255m", expected, 3, 'm');
+}
+
+static void test_256_color_231(void) {
+  // 231 = last cube colour (white)
+  int expected[] = {38, 5, 231};
+  check_csi("256 index 231", "\x1B[38;5;231m", expected, 3, 'm');
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -351,6 +438,21 @@ int main(void) {
   TEST("multiple SGR (31;42;1)");            test_multiple_sgr();           PASS();
   TEST("no-param SGR (ESC[m)");              test_no_param_sgr();           PASS();
   TEST("8-bit CSI SGR");                     test_8bit_csi();               PASS();
+
+  TEST("ext fg 256 (38;5;10)");              test_extended_fg_256();        PASS();
+  TEST("ext fg truecolor (38;2;R;G;B)");     test_extended_fg_truecolor();  PASS();
+  TEST("ext bg 256 (48;5;20)");              test_extended_bg_256();        PASS();
+  TEST("ext bg truecolor (48;2;R;G;B)");     test_extended_bg_truecolor();  PASS();
+  TEST("default fg (39)");                   test_sgr_default_fg();         PASS();
+  TEST("default bg (49)");                   test_sgr_default_bg();         PASS();
+  TEST("ext fg + bold (38;5;10;1)");         test_extended_then_bold();     PASS();
+  TEST("colon sub-param 256 (38:5:10)");     test_colon_subparam_256();     PASS();
+  TEST("colon sub-param truecolor");         test_colon_subparam_truecolor();PASS();
+  TEST("mixed separator (38;5;10:1)");       test_mixed_semicolon_colon();  PASS();
+  TEST("underline colour (58;5;100)");       test_underline_color();        PASS();
+  TEST("256 index 0 (38;5;0)");              test_256_color_0();            PASS();
+  TEST("256 index 255 (38;5;255)");          test_256_color_255();          PASS();
+  TEST("256 index 231 (38;5;231)");          test_256_color_231();          PASS();
 
   printf("\n%d / %d tests passed.\n", tests_passed, tests_run);
   return (tests_passed == tests_run) ? 0 : 1;

@@ -192,6 +192,41 @@ static void on_execute(char c0, void *ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// 256-colour palette resolver
+// ---------------------------------------------------------------------------
+
+static void resolve_256(uint8_t out[3], int idx) {
+  if (idx < 0) idx = 0;
+  if (idx > 255) idx = 255;
+
+  if (idx < 16) {
+    if (idx < 8) {
+      out[0] = ansi_std[idx][0];
+      out[1] = ansi_std[idx][1];
+      out[2] = ansi_std[idx][2];
+    } else {
+      out[0] = ansi_bright[idx - 8][0];
+      out[1] = ansi_bright[idx - 8][1];
+      out[2] = ansi_bright[idx - 8][2];
+    }
+  } else if (idx < 232) {
+    int n = idx - 16;
+    int r = n / 36;
+    int g = (n % 36) / 6;
+    int b = n % 6;
+    // 6×6×6 cube levels: 0, 95, 135, 175, 215, 255
+    static const uint8_t cube_level[6] = {0, 95, 135, 175, 215, 255};
+    out[0] = cube_level[r];
+    out[1] = cube_level[g];
+    out[2] = cube_level[b];
+  } else {
+    // Greyscale ramp: 8, 18, 28, … 238
+    int grey = 8 + (idx - 232) * 10;
+    out[0] = out[1] = out[2] = (uint8_t)grey;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SGR colour handling
 // ---------------------------------------------------------------------------
 
@@ -296,7 +331,6 @@ static void on_csi(int params[16], int num_params,
   // ---- SGR (Select Graphic Rendition) ----
   case 'm': {
     if (num_params == 0) {
-      // No params – treat as single param 0 (reset)
       reset_sgr(t);
       break;
     }
@@ -314,6 +348,14 @@ static void on_csi(int params[16], int num_params,
         t->cur_underline = true;
       } else if (p == 24) {
         t->cur_underline = false;
+
+      // ---- Default colour resets ----
+      } else if (p == 39) {
+        t->cur_fg[0] = default_fg[0]; t->cur_fg[1] = default_fg[1]; t->cur_fg[2] = default_fg[2];
+      } else if (p == 49) {
+        t->cur_bg[0] = default_bg[0]; t->cur_bg[1] = default_bg[1]; t->cur_bg[2] = default_bg[2];
+
+      // ---- Standard foreground / background ----
       } else if (p >= 30 && p <= 37) {
         set_fg(t, p - 30);
       } else if (p >= 40 && p <= 47) {
@@ -322,10 +364,59 @@ static void on_csi(int params[16], int num_params,
         set_bright_fg(t, p - 90);
       } else if (p >= 100 && p <= 107) {
         set_bright_bg(t, p - 100);
+
+      // ---- Extended foreground colour: 38;5;N  or  38;2;R;G;B ----
       } else if (p == 38) {
-        // Extended foreground colour – not fully supported yet
+        if (i + 1 < num_params) {
+          int mode = params[i + 1];
+          if (mode == 5 && i + 2 < num_params) {
+            // 256-colour indexed
+            int idx = params[i + 2];
+            if (idx >= 0) resolve_256(t->cur_fg, idx);
+            i += 2;
+          } else if (mode == 2 && i + 4 < num_params) {
+            // 24-bit RGB
+            int r = params[i + 2];
+            int g = params[i + 3];
+            int b = params[i + 4];
+            if (r >= 0) t->cur_fg[0] = (uint8_t)(r & 0xFF);
+            if (g >= 0) t->cur_fg[1] = (uint8_t)(g & 0xFF);
+            if (b >= 0) t->cur_fg[2] = (uint8_t)(b & 0xFF);
+            i += 4;
+          }
+          // If mode is unrecognised we silently skip
+        }
+
+      // ---- Extended background colour: 48;5;N  or  48;2;R;G;B ----
       } else if (p == 48) {
-        // Extended background colour – not fully supported yet
+        if (i + 1 < num_params) {
+          int mode = params[i + 1];
+          if (mode == 5 && i + 2 < num_params) {
+            int idx = params[i + 2];
+            if (idx >= 0) resolve_256(t->cur_bg, idx);
+            i += 2;
+          } else if (mode == 2 && i + 4 < num_params) {
+            int r = params[i + 2];
+            int g = params[i + 3];
+            int b = params[i + 4];
+            if (r >= 0) t->cur_bg[0] = (uint8_t)(r & 0xFF);
+            if (g >= 0) t->cur_bg[1] = (uint8_t)(g & 0xFF);
+            if (b >= 0) t->cur_bg[2] = (uint8_t)(b & 0xFF);
+            i += 4;
+          }
+        }
+
+      // ---- Extended underline colour: 58;5;N  or  58;2;R;G;B ----
+      } else if (p == 58) {
+        // Underline colour – same parsing as fg/bg extended
+        if (i + 1 < num_params) {
+          int mode = params[i + 1];
+          if (mode == 5 && i + 2 < num_params) {
+            i += 2;
+          } else if (mode == 2 && i + 4 < num_params) {
+            i += 4;
+          }
+        }
       }
     }
     break;

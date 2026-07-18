@@ -463,6 +463,24 @@ static bool test_csi_multi_digit_param(void) {
   return true;
 }
 
+static bool test_csi_colon_subparam(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC [ 38 : 5 : 10 m  -> SGR sub-parameters using ':'
+  parser_feed(&p, (const uint8_t *)"\x1b[38:5:10m", 10);
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI");
+  ASSERT_INT_EQ(m.events[0].final_char, 'm', "SGR");
+  ASSERT_INT_EQ(m.events[0].num_params, 3, "3 params");
+  ASSERT_INT_EQ(m.events[0].params[0], 38, "extended fg");
+  ASSERT_INT_EQ(m.events[0].params[1], 5, "256-colour mode");
+  ASSERT_INT_EQ(m.events[0].params[2], 10, "colour index 10");
+  return true;
+}
+
 static bool test_csi_private_marker(void) {
   parser_t p;
   mock_ctx_t m;
@@ -1132,8 +1150,9 @@ static bool test_null_callbacks(void) {
     TEST(csi_single_param);                                                \
     TEST(csi_multi_param);                                                 \
     TEST(csi_omitted_params);                                              \
-    TEST(csi_multi_digit_param);                                           \
-    TEST(csi_private_marker);                                              \
+    TEST(csi_multi_digit_param);                                              \
+    TEST(csi_colon_subparam);                                                 \
+    TEST(csi_private_marker);                                                 \
     TEST(csi_intermediate);                                                \
     TEST(csi_sgr);                                                         \
     TEST(csi_can_sub_abort);                                               \

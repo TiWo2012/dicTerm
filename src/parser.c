@@ -270,7 +270,8 @@ static void csi_param(parser_t *p, uint8_t b) {
   case ';': // parameter separator
     next_param(p);
     break;
-  case ':': // sub-parameter separator (ignore for now)
+  case ':': // sub-parameter separator – same as ';' for parameter accumulation
+    next_param(p);
     break;
   case '<':
   case '=':
