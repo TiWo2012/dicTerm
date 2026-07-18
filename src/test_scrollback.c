@@ -269,6 +269,281 @@ static bool test_partial_out_buffer(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Additional edge-case and viewport-mapping tests
+// ---------------------------------------------------------------------------
+
+static bool test_capacity_one(void) {
+  // Edge case: buffer with capacity 1.
+  scrollback_t *sb = scrollback_create(1, COLS);
+  ASSERT(sb != NULL, "create cap=1");
+
+  char line[COLS];
+  fill_line(line, 0, COLS);
+  scrollback_push(sb, line);
+  ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after 1 push");
+  ASSERT_INT_EQ(scrollback_total_pushed(sb), 1, "total = 1");
+
+  char out[COLS];
+  ASSERT(scrollback_get(sb, 0, out, COLS), "get index 0");
+  ASSERT(check_line(out, 0, COLS), "line 0");
+
+  // Push a second line – should overwrite the first.
+  fill_line(line, 99, COLS);
+  scrollback_push(sb, line);
+  ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after 2 pushes");
+  ASSERT_INT_EQ(scrollback_total_pushed(sb), 2, "total = 2");
+  ASSERT(scrollback_get(sb, 0, out, COLS), "get index 0 after overwrite");
+  ASSERT(check_line(out, 99, COLS), "most recent = line 99");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_cols_one(void) {
+  // Edge case: buffer with a single column.
+  scrollback_t *sb = scrollback_create(5, 1);
+  ASSERT(sb != NULL, "create cols=1");
+
+  scrollback_push(sb, "A");
+  scrollback_push(sb, "B");
+  scrollback_push(sb, "C");
+
+  ASSERT_INT_EQ(scrollback_count(sb), 3, "count = 3");
+
+  char out[4];
+  ASSERT(scrollback_get(sb, 0, out, 4), "get index 0");
+  ASSERT_INT_EQ(out[0], 'C', "most recent = C");
+  ASSERT(scrollback_get(sb, 2, out, 4), "get index 2");
+  ASSERT_INT_EQ(out[0], 'A', "oldest = A");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_stress_sequential(void) {
+  // Push 10× capacity and verify every stored line.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  int total = CAP * 10;
+  char line[COLS];
+  for (int i = 0; i < total; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  ASSERT_INT_EQ(scrollback_count(sb), CAP, "count capped at CAP");
+  ASSERT_INT_EQ(scrollback_total_pushed(sb), total, "total = 10*CAP");
+
+  // Verify all CAP stored lines: oldest (index CAP-1) to newest (index 0).
+  char out[COLS];
+  for (int i = 0; i < CAP; i++) {
+    int expected_line = total - CAP + i;   // oldest retained line + i
+    ASSERT(scrollback_get(sb, CAP - 1 - i, out, COLS), "get index");
+    ASSERT(check_line(out, expected_line, COLS), "stress line check");
+  }
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_interleaved_push_get(void) {
+  // Interleave pushes and gets to verify ordering is consistent.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  char line[COLS];
+  char out[COLS];
+
+  // Push 3 lines: 0, 1, 2
+  for (int i = 0; i < 3; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  // Read-back line 1 (index 1 should be the second push, line 1).
+  ASSERT(scrollback_get(sb, 1, out, COLS), "get after 3 pushes");
+  ASSERT(check_line(out, 1, COLS), "line 1 at index 1");
+
+  // Push 2 more lines: 3, 4  (now have 0..4 stored)
+  for (int i = 3; i < 5; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  ASSERT(scrollback_get(sb, 0, out, COLS), "get most recent after push");
+  ASSERT(check_line(out, 4, COLS), "most recent = line 4");
+  ASSERT(scrollback_get(sb, 4, out, COLS), "get oldest");
+  ASSERT(check_line(out, 0, COLS), "oldest = line 0");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_viewport_indexing(void) {
+  // Simulate the viewport coordinate mapping used in main.c.
+  //
+  // For a row r with scroll_offset > 0:
+  //   sb_idx = scroll_offset - 1 - r   (which scrollback line to show)
+  //
+  // This test verifies that fetching via scrollback_get with these
+  // computed indices returns the expected content.
+
+  int cap = 20;
+  scrollback_t *sb = scrollback_create(cap, COLS);
+  ASSERT(sb != NULL, "create");
+
+  char line[COLS];
+  int total = 15;  // push 15 distinct lines (lines 0..14)
+  for (int i = 0; i < total; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  char out[COLS];
+
+  // Scenario 1: scroll_offset = 5 (showing 5 scrollback lines at top).
+  //   Row 0 -> sb_idx = 4 -> scrollback_get(4) = line total-1-4 = line 10
+  //   Row 4 -> sb_idx = 0 -> scrollback_get(0) = line total-1   = line 14
+  int scroll_offset = 5;
+  for (int r = 0; r < scroll_offset; r++) {
+    int sb_idx = scroll_offset - 1 - r;
+    int expected_line = total - 1 - sb_idx;
+    ASSERT(scrollback_get(sb, sb_idx, out, COLS), "vp index get");
+    ASSERT(check_line(out, expected_line, COLS), "vp index content");
+  }
+
+  // Scenario 2: scroll_offset = 15 (showing all scrollback lines).
+  //   Row  0 -> sb_idx = 14 -> line 0
+  //   Row 14 -> sb_idx =  0 -> line 14
+  scroll_offset = 15;
+  for (int r = 0; r < scroll_offset; r++) {
+    int sb_idx = scroll_offset - 1 - r;
+    int expected_line = total - 1 - sb_idx;
+    ASSERT(scrollback_get(sb, sb_idx, out, COLS), "vp full get");
+    ASSERT(check_line(out, expected_line, COLS), "vp full content");
+  }
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_offset_clamping(void) {
+  // Verify that scrollback_get correctly rejects out-of-range indices
+  // that would correspond to scroll_offset > scrollback_count.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  char line[COLS];
+  for (int i = 0; i < 3; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  // Only indices 0..2 are valid (count = 3).
+  char out[COLS];
+  ASSERT(scrollback_get(sb, 0, out, COLS),  "index 0 valid");
+  ASSERT(scrollback_get(sb, 2, out, COLS),  "index 2 valid");
+  ASSERT(!scrollback_get(sb, 3, out, COLS), "index 3 out of range");
+  ASSERT(!scrollback_get(sb, 100, out, COLS), "index 100 out of range");
+
+  // Fill to capacity and verify the boundary again.
+  for (int i = 3; i < CAP + 5; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+  // Now count = CAP, so valid indices are 0..CAP-1.
+  ASSERT(!scrollback_get(sb, CAP, out, COLS),     "index CAP out of range");
+  ASSERT(scrollback_get(sb, CAP - 1, out, COLS),  "index CAP-1 valid");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_get_after_clear_and_repush(void) {
+  // Clear the buffer, push fresh content, and verify retrieval.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  char line[COLS];
+  char out[COLS];
+
+  // Push a few lines then clear.
+  for (int i = 0; i < 5; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+  scrollback_clear(sb);
+
+  // Push fresh content (lines 10, 11, 12).
+  for (int i = 10; i < 13; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  ASSERT_INT_EQ(scrollback_count(sb), 3, "count = 3 after clear+repush");
+  ASSERT(scrollback_get(sb, 0, out, COLS), "get index 0");
+  ASSERT(check_line(out, 12, COLS), "most recent = line 12");
+  ASSERT(scrollback_get(sb, 2, out, COLS), "get index 2");
+  ASSERT(check_line(out, 10, COLS), "oldest = line 10");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_many_wrap_arounds(void) {
+  // Push 3× capacity in multiple passes to exercise repeated wraps.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  char line[COLS];
+  char out[COLS];
+  int total = CAP * 3;
+
+  for (int i = 0; i < total; i++) {
+    fill_line(line, i, COLS);
+    scrollback_push(sb, line);
+  }
+
+  ASSERT_INT_EQ(scrollback_count(sb), CAP, "count = CAP after 3 wraps");
+  ASSERT_INT_EQ(scrollback_total_pushed(sb), total, "total = 3*CAP");
+
+  // Verify every stored line.
+  int oldest_expected = total - CAP;  // first line that survives
+  for (int i = 0; i < CAP; i++) {
+    ASSERT(scrollback_get(sb, CAP - 1 - i, out, COLS), "wrap get");
+    ASSERT(check_line(out, oldest_expected + i, COLS), "wrap content");
+  }
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+static bool test_push_null_line(void) {
+  // scrollback_push with NULL line should be a safe no-op.
+  scrollback_t *sb = scrollback_create(CAP, COLS);
+  ASSERT(sb != NULL, "create");
+
+  // Normal push first.
+  char line[COLS];
+  fill_line(line, 42, COLS);
+  scrollback_push(sb, line);
+  ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after normal push");
+
+  // NULL push should not change state.
+  scrollback_push(sb, NULL);
+  ASSERT_INT_EQ(scrollback_count(sb), 1, "count unchanged after NULL push");
+  ASSERT_INT_EQ(scrollback_total_pushed(sb), 1, "total unchanged after NULL push");
+
+  char out[COLS];
+  ASSERT(scrollback_get(sb, 0, out, COLS), "get after NULL push");
+  ASSERT(check_line(out, 42, COLS), "content preserved");
+
+  scrollback_destroy(sb);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -285,6 +560,17 @@ int main(void) {
   TEST(null_safety);
   TEST(exact_capacity);
   TEST(partial_out_buffer);
+
+  // New tests for edge cases and viewport-mapping patterns.
+  TEST(capacity_one);
+  TEST(cols_one);
+  TEST(stress_sequential);
+  TEST(interleaved_push_get);
+  TEST(viewport_indexing);
+  TEST(offset_clamping);
+  TEST(get_after_clear_and_repush);
+  TEST(many_wrap_arounds);
+  TEST(push_null_line);
 
   printf("\n");
   printf("=================\n");
