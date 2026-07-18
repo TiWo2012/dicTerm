@@ -34,8 +34,7 @@ void scrollback_destroy(scrollback_t *sb);
 
 /**
  * Push a line (cols bytes) into the scrollback buffer.
- * The line is copied internally.  If the buffer is full the oldest line
- * is overwritten.
+ * Characters that are < 0x20 (except tab and newline) are turned into spaces.
  */
 void scrollback_push(scrollback_t *sb, const char *line);
 

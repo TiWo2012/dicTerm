@@ -1,4 +1,3 @@
-/* dicTerm - GPU-accelerated terminal emulator */
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -12,10 +11,11 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
+#include "parser.h"
 #include "font.h"
 #include "input.h"
-#include "parser.h"
 #include "scrollback.h"
+#include "screen.h"
 
 #define ROWS 36
 #define COLS 100
@@ -26,79 +26,140 @@
 // ---------------------------------------------------------------------------
 // Terminal state
 // ---------------------------------------------------------------------------
+
 typedef struct {
-  uint8_t    screen[ROWS][COLS];
-  int        cx, cy;
-  int        saved_cx, saved_cy;
-  parser_t   parser;
+  screen_buf_t  screen;         // visible grid with SGR attributes
+  int           cx, cy;         // cursor position (0-based)
+  int           saved_cx, saved_cy;  // DECSC/DECRC saved position
+
+  // Current SGR state (applied to subsequent cells)
+  uint8_t       cur_fg[3];      // current foreground colour
+  uint8_t       cur_bg[3];      // current background colour
+  bool          cur_bold;
+  bool          cur_underline;
+
+  parser_t      parser;
   scrollback_t *scrollback;
   font_handle_t *font;
-  int        win_width;
-  int        win_height;
+  int           win_width;
+  int           win_height;
 } terminal_t;
+
+// ---------------------------------------------------------------------------
+// Colour tables for ANSI SGR codes
+// ---------------------------------------------------------------------------
+
+// Standard ANSI colours (codes 30-37 and 40-47)
+static const uint8_t ansi_std[8][3] = {
+  {  0,   0,   0},  // 0 black
+  {205,  49,  49},  // 1 red
+  { 13, 188, 121},  // 2 green
+  {229, 229,  16},  // 3 yellow
+  { 36, 114, 200},  // 4 blue
+  {188,  63, 188},  // 5 magenta
+  { 17, 168, 205},  // 6 cyan
+  {229, 229, 229},  // 7 white
+};
+
+// Bright ANSI colours (codes 90-97 and 100-107)
+static const uint8_t ansi_bright[8][3] = {
+  {128, 128, 128},  // 0 bright black (grey)
+  {255,  85,  85},  // 1 bright red
+  { 80, 255, 123},  // 2 bright green
+  {255, 255,  85},  // 3 bright yellow
+  {100, 150, 255},  // 4 bright blue
+  {255,  85, 255},  // 5 bright magenta
+  { 85, 255, 255},  // 6 bright cyan
+  {255, 255, 255},  // 7 bright white
+};
+
+// Default colours (used when SGR 0 is sent)
+static const uint8_t default_fg[3] = {220, 220, 220};
+static const uint8_t default_bg[3] = {  0,   0,   0};
+
+// ---------------------------------------------------------------------------
+// Scroll operations
+// ---------------------------------------------------------------------------
+
+static void scroll_up(terminal_t *t, int count) {
+  int cols = t->screen.cols;
+  char line_buf[COLS];
+  for (int n = 0; n < count; n++) {
+    // Copy the top row's characters into a plain buffer for scrollback
+    for (int c = 0; c < COLS && c < cols; c++)
+      line_buf[c] = t->screen.cells[c].ch;
+    scrollback_push(t->scrollback, line_buf);
+
+    // Shift all rows up by one
+    memmove(t->screen.cells,
+            t->screen.cells + cols,
+            (size_t)(t->screen.rows - 1) * cols * sizeof(screen_cell_t));
+    // Clear the new bottom row
+    for (int c = 0; c < cols; c++) {
+      screen_cell_t *cell = &t->screen.cells[(t->screen.rows - 1) * cols + c];
+      cell->ch = ' ';
+      cell->fg[0] = default_fg[0]; cell->fg[1] = default_fg[1]; cell->fg[2] = default_fg[2];
+      cell->bg[0] = default_bg[0]; cell->bg[1] = default_bg[1]; cell->bg[2] = default_bg[2];
+      cell->bold = cell->italic = cell->underline = cell->blink = 0;
+    }
+  }
+}
+
+static void scroll_down(terminal_t *t, int count) {
+  int cols = t->screen.cols;
+  for (int n = 0; n < count; n++) {
+    // Shift all rows down by one
+    memmove(t->screen.cells + cols,
+            t->screen.cells,
+            (size_t)(t->screen.rows - 1) * cols * sizeof(screen_cell_t));
+    // Clear the new top row
+    for (int c = 0; c < cols; c++) {
+      screen_cell_t *cell = &t->screen.cells[c];
+      cell->ch = ' ';
+      cell->fg[0] = default_fg[0]; cell->fg[1] = default_fg[1]; cell->fg[2] = default_fg[2];
+      cell->bg[0] = default_bg[0]; cell->bg[1] = default_bg[1]; cell->bg[2] = default_bg[2];
+      cell->bold = cell->italic = cell->underline = cell->blink = 0;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Screen helpers
 // ---------------------------------------------------------------------------
-static void scroll_up(terminal_t *t) {
-  scrollback_push(t->scrollback, (const char *)t->screen[0]);
-  for (int i = 0; i < ROWS - 1; i++)
-    memcpy(t->screen[i], t->screen[i + 1], COLS);
-  memset(t->screen[ROWS - 1], ' ', COLS);
-}
 
 static void clear_screen(terminal_t *t) {
-  for (int r = 0; r < ROWS; r++)
-    memset(t->screen[r], ' ', COLS);
+  for (int r = 0; r < t->screen.rows; r++)
+    screen_buf_clear_row(&t->screen, r, true);
   scrollback_clear(t->scrollback);
   t->cx = 0;
   t->cy = 0;
 }
 
-static void erase_display(terminal_t *t, int mode) {
-  if (mode == 0) {
-    for (int r = t->cy; r < ROWS; r++) {
-      int start = (r == t->cy) ? t->cx : 0;
-      for (int c = start; c < COLS; c++)
-        t->screen[r][c] = ' ';
-    }
-  } else if (mode == 1) {
-    for (int r = 0; r <= t->cy; r++) {
-      int end = (r == t->cy) ? t->cx : COLS - 1;
-      for (int c = 0; c <= end; c++)
-        t->screen[r][c] = ' ';
-    }
-  } else if (mode == 2) {
-    clear_screen(t);
-  }
-}
-
-static void erase_line(terminal_t *t, int mode) {
-  if (mode == 0) {
-    for (int c = t->cx; c < COLS; c++)
-      t->screen[t->cy][c] = ' ';
-  } else if (mode == 1) {
-    for (int c = 0; c <= t->cx; c++)
-      t->screen[t->cy][c] = ' ';
-  } else if (mode == 2) {
-    memset(t->screen[t->cy], ' ', COLS);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Parser callbacks
 // ---------------------------------------------------------------------------
+
 static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
-  if (t->cx >= COLS || t->cy >= ROWS) return;
-  t->screen[t->cy][t->cx++] = ch;
-  if (t->cx >= COLS) {
+  if (t->cx >= t->screen.cols) {
     t->cx = 0;
-    if (++t->cy >= ROWS) {
-      scroll_up(t);
-      t->cy = ROWS - 1;
-    }
+    t->cy++;
   }
+  if (t->cy >= t->screen.rows) {
+    scroll_up(t, 1);
+    t->cy = t->screen.rows - 1;
+  }
+
+  screen_cell_t *cell = screen_buf_cell(&t->screen, t->cy, t->cx);
+  if (cell) {
+    cell->ch = ch;
+    // Inherit current SGR state
+    cell->fg[0] = t->cur_fg[0]; cell->fg[1] = t->cur_fg[1]; cell->fg[2] = t->cur_fg[2];
+    cell->bg[0] = t->cur_bg[0]; cell->bg[1] = t->cur_bg[1]; cell->bg[2] = t->cur_bg[2];
+    cell->bold = t->cur_bold;
+    cell->underline = t->cur_underline;
+  }
+  t->cx++;
 }
 
 static void on_execute(char c0, void *ctx) {
@@ -106,20 +167,76 @@ static void on_execute(char c0, void *ctx) {
   switch (c0) {
   case '\n':
     t->cy++;
-    if (t->cy >= ROWS) { scroll_up(t); t->cy = ROWS - 1; }
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
+    }
     break;
   case '\r': t->cx = 0; break;
-  case '\b': if (t->cx > 0) t->cx--; break;
-  case '\t':
-    t->cx += 8;
-    if (t->cx >= COLS) t->cx = COLS - 1;
+  case '\b':
+    if (t->cx > 0) t->cx--;
     break;
-  case 0x0B: case 0x0C:
+  case '\t': {
+    int stop = ((t->cx / 8) + 1) * 8;
+    t->cx = (stop < t->screen.cols) ? stop : t->screen.cols - 1;
+    break;
+  }
+  case 0x0B: case 0x0C:  // VT, FF
     t->cy++;
-    if (t->cy >= ROWS) { scroll_up(t); t->cy = ROWS - 1; }
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
+    }
     break;
   }
 }
+
+// ---------------------------------------------------------------------------
+// SGR colour handling
+// ---------------------------------------------------------------------------
+
+static void reset_sgr(terminal_t *t) {
+  t->cur_fg[0] = default_fg[0]; t->cur_fg[1] = default_fg[1]; t->cur_fg[2] = default_fg[2];
+  t->cur_bg[0] = default_bg[0]; t->cur_bg[1] = default_bg[1]; t->cur_bg[2] = default_bg[2];
+  t->cur_bold = false;
+  t->cur_underline = false;
+}
+
+static void set_fg(terminal_t *t, int idx) {
+  if (idx >= 0 && idx < 8) {
+    t->cur_fg[0] = ansi_std[idx][0];
+    t->cur_fg[1] = ansi_std[idx][1];
+    t->cur_fg[2] = ansi_std[idx][2];
+  }
+}
+
+static void set_bg(terminal_t *t, int idx) {
+  if (idx >= 0 && idx < 8) {
+    t->cur_bg[0] = ansi_std[idx][0];
+    t->cur_bg[1] = ansi_std[idx][1];
+    t->cur_bg[2] = ansi_std[idx][2];
+  }
+}
+
+static void set_bright_fg(terminal_t *t, int idx) {
+  if (idx >= 0 && idx < 8) {
+    t->cur_fg[0] = ansi_bright[idx][0];
+    t->cur_fg[1] = ansi_bright[idx][1];
+    t->cur_fg[2] = ansi_bright[idx][2];
+  }
+}
+
+static void set_bright_bg(terminal_t *t, int idx) {
+  if (idx >= 0 && idx < 8) {
+    t->cur_bg[0] = ansi_bright[idx][0];
+    t->cur_bg[1] = ansi_bright[idx][1];
+    t->cur_bg[2] = ansi_bright[idx][2];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CSI handler
+// ---------------------------------------------------------------------------
 
 static void on_csi(int params[16], int num_params,
                    char intermediates[2], int num_intermediates,
@@ -130,65 +247,150 @@ static void on_csi(int params[16], int num_params,
 #define PARAM(n) ((n) < num_params && params[(n)] >= 0 ? params[(n)] : -1)
 
   switch (final) {
-  case 'A': { int n = PARAM(0); if (n < 0) n = 1; t->cy -= n; if (t->cy < 0) t->cy = 0; break; }
-  case 'B': { int n = PARAM(0); if (n < 0) n = 1; t->cy += n; if (t->cy >= ROWS) t->cy = ROWS - 1; break; }
-  case 'C': { int n = PARAM(0); if (n < 0) n = 1; t->cx += n; if (t->cx >= COLS) t->cx = COLS - 1; break; }
-  case 'D': { int n = PARAM(0); if (n < 0) n = 1; t->cx -= n; if (t->cx < 0) t->cx = 0; break; }
-  case 'H':
-  case 'f': {
-    int row = PARAM(0); if (row < 0) row = 1;
-    int col = PARAM(1); if (col < 0) col = 1;
-    t->cy = (row > 0) ? row - 1 : 0;
-    t->cx = (col > 0) ? col - 1 : 0;
-    if (t->cy >= ROWS) t->cy = ROWS - 1;
-    if (t->cx >= COLS) t->cx = COLS - 1;
+  // ---- Cursor movement ----
+  case 'A': {
+    int n = PARAM(0); if (n < 0) n = 1;
+    t->cy -= n; if (t->cy < 0) t->cy = 0;
     break;
   }
+  case 'B': {
+    int n = PARAM(0); if (n < 0) n = 1;
+    t->cy += n; if (t->cy >= t->screen.rows) t->cy = t->screen.rows - 1;
+    break;
+  }
+  case 'C': {
+    int n = PARAM(0); if (n < 0) n = 1;
+    t->cx += n; if (t->cx >= t->screen.cols) t->cx = t->screen.cols - 1;
+    break;
+  }
+  case 'D': {
+    int n = PARAM(0); if (n < 0) n = 1;
+    t->cx -= n; if (t->cx < 0) t->cx = 0;
+    break;
+  }
+  case 'H': case 'f': {
+    int row = PARAM(0); if (row < 0) row = 1; row--;
+    int col = PARAM(1); if (col < 0) col = 1; col--;
+    if (row < 0) row = 0; if (row >= t->screen.rows) row = t->screen.rows - 1;
+    if (col < 0) col = 0; if (col >= t->screen.cols) col = t->screen.cols - 1;
+    t->cy = row; t->cx = col;
+    break;
+  }
+
+  // ---- Erase ----
   case 'J': {
-    int mode = PARAM(0);
-    if (mode < 0) mode = 0;
-    erase_display(t, mode);
+    int mode = PARAM(0); if (mode < 0) mode = 0;
+    screen_buf_erase_display(&t->screen, t->cy, t->cx, mode, true);
     break;
   }
   case 'K': {
-    int mode = PARAM(0);
-    if (mode < 0) mode = 0;
-    erase_line(t, mode);
+    int mode = PARAM(0); if (mode < 0) mode = 0;
+    screen_buf_erase_line(&t->screen, t->cy, t->cx, mode, true);
     break;
   }
+
+  // ---- Save / Restore cursor (DEC private) ----
   case 's': t->saved_cx = t->cx; t->saved_cy = t->cy; break;
   case 'u': t->cx = t->saved_cx; t->cy = t->saved_cy; break;
-  case 'm': break;
+
+  // ---- SGR (Select Graphic Rendition) ----
+  case 'm': {
+    if (num_params == 0) {
+      // No params – treat as single param 0 (reset)
+      reset_sgr(t);
+      break;
+    }
+    for (int i = 0; i < num_params; i++) {
+      int p = params[i];
+      if (p < 0) p = 0;
+
+      if (p == 0) {
+        reset_sgr(t);
+      } else if (p == 1) {
+        t->cur_bold = true;
+      } else if (p == 22) {
+        t->cur_bold = false;
+      } else if (p == 4) {
+        t->cur_underline = true;
+      } else if (p == 24) {
+        t->cur_underline = false;
+      } else if (p >= 30 && p <= 37) {
+        set_fg(t, p - 30);
+      } else if (p >= 40 && p <= 47) {
+        set_bg(t, p - 40);
+      } else if (p >= 90 && p <= 97) {
+        set_bright_fg(t, p - 90);
+      } else if (p >= 100 && p <= 107) {
+        set_bright_bg(t, p - 100);
+      } else if (p == 38) {
+        // Extended foreground colour – not fully supported yet
+      } else if (p == 48) {
+        // Extended background colour – not fully supported yet
+      }
+    }
+    break;
+  }
+
+  // ---- Scroll ----
+  case 'S': { // SU – scroll up
+    int n = PARAM(0); if (n < 0) n = 1;
+    scroll_up(t, n);
+    break;
+  }
+  case 'T': { // SD – scroll down
+    int n = PARAM(0); if (n < 0) n = 1;
+    scroll_down(t, n);
+    break;
+  }
   }
 
 #undef PARAM
 }
 
+// ---------------------------------------------------------------------------
+// ESC handler
+// ---------------------------------------------------------------------------
+
 static void on_esc(char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
   (void)intermediates; (void)num_intermediates;
   terminal_t *t = (terminal_t *)ctx;
+
   switch (final) {
-  case '7': t->saved_cx = t->cx; t->saved_cy = t->cy; break;
-  case '8': t->cx = t->saved_cx; t->cy = t->saved_cy; break;
-  case 'D':
-    t->cy++;
-    if (t->cy >= ROWS) { scroll_up(t); t->cy = ROWS - 1; }
+  case '7': // DECSC – save cursor
+    t->saved_cx = t->cx; t->saved_cy = t->cy;
     break;
-  case 'M':
-    t->cy--;
-    if (t->cy < 0) {
-      for (int i = ROWS - 1; i > 0; i--)
-        memcpy(t->screen[i], t->screen[i - 1], COLS);
-      memset(t->screen[0], ' ', COLS);
-      t->cy = 0;
+  case '8': // DECRC – restore cursor
+    t->cx = t->saved_cx; t->cy = t->saved_cy;
+    break;
+  case 'D': // IND – index (scroll up if at bottom)
+    t->cy++;
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
     }
     break;
-  case 'E':
-    t->cx = 0; t->cy++;
-    if (t->cy >= ROWS) { scroll_up(t); t->cy = ROWS - 1; }
+  case 'M': // RI – reverse index (scroll down if at top)
+    if (t->cy == 0) {
+      scroll_down(t, 1);
+    } else {
+      t->cy--;
+    }
     break;
-  case 'c': clear_screen(t); break;
+  case 'E': // NEL – next line
+    t->cx = 0; t->cy++;
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
+    }
+    break;
+  case 'c': // RIS – reset to initial state
+    clear_screen(t);
+    reset_sgr(t);
+    t->saved_cx = t->saved_cy = 0;
+    break;
+  case 'H': // HTS – set tab stop (ignored)
+    break;
   }
 }
 
@@ -203,6 +405,7 @@ static void on_dcs(int cmd, const char *str, void *ctx) {
 // ---------------------------------------------------------------------------
 // PTY helpers
 // ---------------------------------------------------------------------------
+
 static int pty_fork(void) {
   int master_fd;
   struct winsize ws = {
@@ -234,16 +437,64 @@ static void pty_resize(int master_fd, int cols, int rows) {
 }
 
 // ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+static void render_cell(font_handle_t *font, const screen_cell_t *cell,
+                        float x, float y, float char_w, float char_h) {
+  if (!font || !cell) return;
+
+  // Determine the glyph to draw
+  int cp = cell->ch;
+  if (cp < 0x20 && cp != '\t')
+    cp = ' ';
+  if (cp >= 0x80)
+    cp = cell->ch; // pass through UTF-8 leader bytes
+
+  bool has_bg = (cell->bg[0] != 0 || cell->bg[1] != 0 || cell->bg[2] != 0);
+
+  // Draw background rectangle if non-default
+  if (has_bg) {
+    Color bg_col = { cell->bg[0], cell->bg[1], cell->bg[2], 255 };
+    DrawRectangle((int)x, (int)y, (int)char_w, (int)char_h, bg_col);
+  }
+
+  // Draw foreground glyph
+  Color fg_col = { cell->fg[0], cell->fg[1], cell->fg[2], 255 };
+
+  // Bold effect: if bold, render twice with a 1px offset for a pseudo-bold look
+  if (cell->bold && font->current) {
+    DrawTextCodepoints(*font->current, &cp, 1,
+                       (Vector2){ x + 1.0f, y + font->ascent },
+                       font->font_size, font->spacing, fg_col);
+  }
+
+  if (font->current) {
+    DrawTextCodepoints(*font->current, &cp, 1,
+                       (Vector2){ x, y + font->ascent },
+                       font->font_size, font->spacing, fg_col);
+  }
+
+  // Underline effect
+  if (cell->underline) {
+    float underline_y = y + font->font_size - 2.0f;
+    DrawLine((int)x, (int)underline_y,
+             (int)(x + char_w), (int)underline_y, fg_col);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
 int main(void) {
   SetConfigFlags(FLAG_WINDOW_RESIZABLE);
   InitWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm");
 
-  // Font subsystem (requires GPU context)
+  // Font subsystem
   font_handle_t *font = font_init(NULL, NULL, 20.0f);
   if (!font) {
-    fprintf(stderr, "dicTerm: Failed to initialize fonts.\n");
+    fprintf(stderr, "dicTerm: Failed to initialise fonts.\n");
     CloseWindow();
     return 1;
   }
@@ -267,19 +518,27 @@ int main(void) {
 
   // Terminal state
   terminal_t term = {0};
-  term.scrollback = scrollback_create(SCROLLBACK_CAPACITY, COLS);
-  if (!term.scrollback) {
+  term.screen = *screen_buf_new(ROWS, COLS);
+  if (!term.screen.cells) {
     close(master_fd);
     font_uninit(font);
     CloseWindow();
     return 1;
   }
+
+  term.scrollback = scrollback_create(SCROLLBACK_CAPACITY, COLS);
+  if (!term.scrollback) {
+    screen_buf_free(&term.screen);
+    close(master_fd);
+    font_uninit(font);
+    CloseWindow();
+    return 1;
+  }
+
   term.font = font;
   term.win_width  = WIN_WIDTH;
   term.win_height = WIN_HEIGHT;
-
-  for (int r = 0; r < ROWS; r++)
-    memset(term.screen[r], ' ', COLS);
+  reset_sgr(&term);
 
   parser_callbacks_t cbs = {
     .on_print   = on_print,
@@ -291,11 +550,8 @@ int main(void) {
   };
   parser_init(&term.parser, &cbs, &term);
 
-  // Parser stuck detection: if the parser stays in the same non-GROUND
-  // state for more than STUCK_FRAME_LIMIT frames, forcibly reset it.
-  // This prevents unterminated OSC/DCS/CSI sequences from paralyzing
-  // the terminal (e.g. zsh window-title OSC without a terminator).
-  enum { STUCK_FRAME_LIMIT = 60 }; // ~1 second at 60 FPS
+  // Parser stuck detection
+  enum { STUCK_FRAME_LIMIT = 60 };
   int parser_stuck_frames = 0;
   parser_state_t prev_parser_state = PARSER_GROUND;
 
@@ -332,11 +588,7 @@ int main(void) {
       pty_resize(master_fd, new_cols, new_rows);
     }
 
-    // Parser stuck detection: if the parser hasn't returned to GROUND
-    // for STUCK_FRAME_LIMIT frames, forcibly reset it.
-    // This is essential because some shells (zsh) may send OSC sequences
-    // (e.g. \e]0;... for window title) without proper BEL/ST terminators,
-    // which would otherwise permanently paralyze the terminal.
+    // Parser stuck detection
     {
       parser_state_t cur = term.parser.state;
       if (cur != PARSER_GROUND) {
@@ -347,7 +599,6 @@ int main(void) {
             parser_stuck_frames = 0;
           }
         } else {
-          // State changed but still not GROUND – reset the counter
           parser_stuck_frames = 0;
         }
       } else {
@@ -356,19 +607,17 @@ int main(void) {
       prev_parser_state = cur;
     }
 
-    // Render
+    // ---- Render ----
     BeginDrawing();
-    ClearBackground((Color){ 30, 30, 30, 255 });
+    ClearBackground((Color){ 15, 20, 25, 255 });
 
-    Color fg = (Color){ 220, 220, 220, 255 };
-    Color bg = (Color){ 30, 30, 30, 0 };
-
-    for (int r = 0; r < ROWS; r++) {
-      char line[COLS + 1];
-      memcpy(line, term.screen[r], COLS);
-      line[COLS] = '\0';
+    for (int r = 0; r < term.screen.rows; r++) {
       float y = (float)WIN_PADDING + (float)r * char_h;
-      font_render_line(font, (const char *)line, COLS, (float)WIN_PADDING, y, fg, bg);
+      for (int c = 0; c < term.screen.cols; c++) {
+        const screen_cell_t *cell = &term.screen.cells[r * term.screen.cols + c];
+        float x = (float)WIN_PADDING + (float)c * char_w;
+        render_cell(term.font, cell, x, y, char_w, char_h);
+      }
     }
 
     // Cursor: inverted block
@@ -378,13 +627,12 @@ int main(void) {
       DrawRectangle((int)cx, (int)cy, (int)char_w, (int)char_h,
                     (Color){ 220, 220, 220, 180 });
 
-      unsigned char cc = term.screen[term.cy][term.cx];
-      if (cc < 0x20) cc = ' ';
-      int cp[1] = { (int)cc };
-      DrawTextCodepoints(*font->current, cp, 1,
+      int cp = term.screen.cells[term.cy * term.screen.cols + term.cx].ch;
+      if (cp < 0x20) cp = ' ';
+      DrawTextCodepoints(*font->current, &cp, 1,
                          (Vector2){ cx, cy + font->ascent },
                          font->font_size, font->spacing,
-                         (Color){ 30, 30, 30, 255 });
+                         (Color){ 15, 20, 25, 255 });
     }
 
     EndDrawing();
@@ -393,6 +641,7 @@ int main(void) {
 done:
   close(master_fd);
   scrollback_destroy(term.scrollback);
+  screen_buf_free(&term.screen);
   font_uninit(font);
   CloseWindow();
   return 0;
