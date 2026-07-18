@@ -1,3 +1,11 @@
+/**
+ * @file screen.c
+ * @brief Screen buffer implementation.
+ *
+ * Implements the row-major cell grid with SGR attribute support
+ * defined in screen.h.  All functions are bounds-checked and
+ * NULL-safe.
+ */
 #define _DEFAULT_SOURCE
 #include "screen.h"
 #include <stdlib.h>
@@ -7,6 +15,10 @@
 // Screen buffer implementation
 // ---------------------------------------------------------------------------
 
+/// @brief Allocate and initialise a screen buffer.
+/// @param rows  Number of rows (> 0).
+/// @param cols  Number of columns (> 0).
+/// @return      New buffer, or NULL on allocation failure.
 screen_buf_t* screen_buf_new(int rows, int cols) {
   if (rows <= 0 || cols <= 0) return NULL;
 
@@ -36,24 +48,42 @@ screen_buf_t* screen_buf_new(int rows, int cols) {
   return sb;
 }
 
+/// @brief Free a screen buffer.
+/// @param sb  Buffer to free (NULL-safe).
 void screen_buf_free(screen_buf_t *sb) {
   if (!sb) return;
   free(sb->cells);
   free(sb);
 }
 
+/// @brief Write one character into a cell without touching colour attributes.
+/// @param sb   Target buffer.
+/// @param row  Row index.
+/// @param col  Column index.
+/// @param ch   Character to write.
 void screen_buf_put(screen_buf_t *sb, int row, int col, uint8_t ch) {
   if (!sb || row < 0 || row >= sb->rows || col < 0 || col >= sb->cols)
     return;
   sb->cells[row * sb->cols + col].ch = ch;
 }
 
+/// @brief Return a pointer to a cell, or NULL if out of bounds.
+/// @param sb   Target buffer.
+/// @param row  Row index.
+/// @param col  Column index.
+/// @return     Pointer to cell, or NULL.
 screen_cell_t* screen_buf_cell(screen_buf_t *sb, int row, int col) {
   if (!sb || row < 0 || row >= sb->rows || col < 0 || col >= sb->cols)
     return NULL;
   return &sb->cells[row * sb->cols + col];
 }
 
+/// @brief Apply SGR foreground/background colours to a cell.
+/// @param sb   Target buffer.
+/// @param row  Row index.
+/// @param col  Column index.
+/// @param fg   Foreground RGB (3 bytes).
+/// @param bg   Background RGB (3 bytes).
 void screen_buf_apply_sgr(screen_buf_t *sb, int row, int col,
                           const uint8_t fg[3], const uint8_t bg[3]) {
   screen_cell_t *cell = screen_buf_cell(sb, row, col);
@@ -62,6 +92,10 @@ void screen_buf_apply_sgr(screen_buf_t *sb, int row, int col,
   cell->bg[0] = bg[0]; cell->bg[1] = bg[1]; cell->bg[2] = bg[2];
 }
 
+/// @brief Clear a single row, optionally resetting colours.
+/// @param sb             Target buffer.
+/// @param row            Row to clear.
+/// @param reset_colours  If true, reset fg/bg and style flags to defaults.
 void screen_buf_clear_row(screen_buf_t *sb, int row, bool reset_colours) {
   if (!sb || row < 0 || row >= sb->rows) return;
   for (int c = 0; c < sb->cols; c++) {
@@ -75,6 +109,17 @@ void screen_buf_clear_row(screen_buf_t *sb, int row, bool reset_colours) {
   }
 }
 
+/// @brief Erase parts of the display (ED).
+///
+/// Mode 0: cursor to end of screen.
+/// Mode 1: start to cursor.
+/// Mode 2: entire screen.
+///
+/// @param sb             Target buffer.
+/// @param row            Cursor row.
+/// @param col            Cursor column.
+/// @param mode           Erase mode (0, 1, 2).
+/// @param reset_colours  If true, reset colours in erased area.
 void screen_buf_erase_display(screen_buf_t *sb, int row, int col, int mode,
                               bool reset_colours) {
   if (!sb) return;
@@ -112,6 +157,17 @@ void screen_buf_erase_display(screen_buf_t *sb, int row, int col, int mode,
   }
 }
 
+/// @brief Erase parts of a single line (EL).
+///
+/// Mode 0: cursor to end of line.
+/// Mode 1: start to cursor.
+/// Mode 2: entire line.
+///
+/// @param sb             Target buffer.
+/// @param row            Row to erase within.
+/// @param col            Cursor column.
+/// @param mode           Erase mode (0, 1, 2).
+/// @param reset_colours  If true, reset colours in erased area.
 void screen_buf_erase_line(screen_buf_t *sb, int row, int col, int mode,
                            bool reset_colours) {
   if (!sb || row < 0 || row >= sb->rows) return;

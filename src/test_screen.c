@@ -1,3 +1,11 @@
+/**
+ * @file test_screen.c
+ * @brief Unit tests for the screen buffer (screen.h / screen.c).
+ *
+ * Verifies allocation, deallocation, cell access, SGR attribute
+ * application, row clearing, and erase operations.
+ */
+
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +39,8 @@ static int tests_passed = 0;
 // Tests
 // ---------------------------------------------------------------------------
 
+/// @brief Verify that screen_buf_new allocates a properly initialised buffer
+///        and screen_buf_free releases it without leaking.
 static void test_new_free(void) {
   screen_buf_t *sb = screen_buf_new(10, 20);
   assert(sb != NULL);
@@ -55,6 +65,8 @@ static void test_new_free(void) {
   screen_buf_free(sb);
 }
 
+/// @brief Test screen_buf_put and screen_buf_cell with valid and
+///        out-of-bounds indices.
 static void test_put_and_cell(void) {
   screen_buf_t *sb = screen_buf_new(5, 10);
 
@@ -70,6 +82,7 @@ static void test_put_and_cell(void) {
   screen_buf_free(sb);
 }
 
+/// @brief Verify screen_buf_apply_sgr sets foreground and background colours.
 static void test_apply_sgr(void) {
   screen_buf_t *sb = screen_buf_new(3, 5);
 
@@ -85,6 +98,7 @@ static void test_apply_sgr(void) {
   screen_buf_free(sb);
 }
 
+/// @brief Test screen_buf_clear_row with and without colour reset.
 static void test_clear_row(void) {
   screen_buf_t *sb = screen_buf_new(4, 8);
   uint8_t fg[3] = {200, 100, 50};
@@ -109,6 +123,7 @@ static void test_clear_row(void) {
   screen_buf_free(sb);
 }
 
+/// @brief Test erase display modes (0 = cursor→end, 1 = start→cursor, 2 = all).
 static void test_erase_display(void) {
   screen_buf_t *sb = screen_buf_new(3, 5);
 
@@ -130,6 +145,7 @@ static void test_erase_display(void) {
   screen_buf_free(sb);
 }
 
+/// @brief Test erase line modes (0 = cursor→end, 1 = start→cursor, 2 = all).
 static void test_erase_line(void) {
   screen_buf_t *sb = screen_buf_new(3, 5);
 

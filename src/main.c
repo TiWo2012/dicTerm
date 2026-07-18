@@ -23,9 +23,15 @@
 #define WIN_WIDTH  1280
 #define WIN_HEIGHT 800
 
-// ---------------------------------------------------------------------------
-// Terminal state
-// ---------------------------------------------------------------------------
+/**
+ * @file main.c
+ * @brief Terminal emulator entry point and main loop.
+ *
+ * Spawns a child shell via forkpty, parses its output with the ANSI
+ * escape sequence state machine (parser.c), stores characters together
+ * with SGR colour attributes in a screen_buf_t grid, and renders each
+ * cell with its individual colours using raylib's font subsystem.
+ */
 
 typedef struct {
   screen_buf_t  screen;         // visible grid with SGR attributes
@@ -81,6 +87,13 @@ static const uint8_t default_bg[3] = {  0,   0,   0};
 // Scroll operations
 // ---------------------------------------------------------------------------
 
+/// @brief Scroll the screen content up by `count` rows.
+///
+/// The top `count` rows are pushed to the scrollback buffer and the
+/// bottom rows are filled with space characters using default colours.
+///
+/// @param t      Terminal state.
+/// @param count  Number of rows to scroll up.
 static void scroll_up(terminal_t *t, int count) {
   int cols = t->screen.cols;
   char line_buf[COLS];
@@ -105,6 +118,13 @@ static void scroll_up(terminal_t *t, int count) {
   }
 }
 
+/// @brief Scroll the screen content down by `count` rows (reverse scroll).
+///
+/// The bottom rows are scrolled down and the top rows are filled with
+/// spaces using default colours.
+///
+/// @param t      Terminal state.
+/// @param count  Number of rows to scroll down.
 static void scroll_down(terminal_t *t, int count) {
   int cols = t->screen.cols;
   for (int n = 0; n < count; n++) {
@@ -127,6 +147,12 @@ static void scroll_down(terminal_t *t, int count) {
 // Screen helpers
 // ---------------------------------------------------------------------------
 
+/// @brief Clear the entire screen and scrollback, return cursor to home.
+///
+/// Resets all cells to space with default colours and clears the
+/// scrollback history.  Cursor is moved to (0, 0).
+///
+/// @param t  Terminal state.
 static void clear_screen(terminal_t *t) {
   for (int r = 0; r < t->screen.rows; r++)
     screen_buf_clear_row(&t->screen, r, true);
@@ -136,9 +162,17 @@ static void clear_screen(terminal_t *t) {
 }
 
 // ---------------------------------------------------------------------------
-// Parser callbacks
+// Parser callbacks – invoked by parser.c state machine.
 // ---------------------------------------------------------------------------
 
+/// @brief Handle a printable character from the child shell.
+///
+/// Writes the character into the current cursor cell, inheriting the
+/// active SGR colour attributes (cur_fg, cur_bg, bold, underline).
+/// Advances the cursor; scrolls up if the cursor moves past the last row.
+///
+/// @param ch   Character byte.
+/// @param ctx  Pointer to terminal_t (opaque context).
 static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
   if (t->cx >= t->screen.cols) {
@@ -162,6 +196,12 @@ static void on_print(uint8_t ch, void *ctx) {
   t->cx++;
 }
 
+/// @brief Handle a C0 control character.
+///
+/// Processes LF, CR, BS, HT, VT, FF by moving the cursor or scrolling.
+///
+/// @param c0   Control character byte (0x00–0x1F, excluding ESC).
+/// @param ctx  Pointer to terminal_t.
 static void on_execute(char c0, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
   switch (c0) {
@@ -195,6 +235,16 @@ static void on_execute(char c0, void *ctx) {
 // 256-colour palette resolver
 // ---------------------------------------------------------------------------
 
+/// @brief Resolve an 8-bit colour index (0–255) into RGB.
+///
+/// Palette layout (standard xterm):
+///   -   0– 7:  standard ANSI colours
+///   -   8–15:  bright ANSI colours
+///   -  16–231: 6×6×6 RGB cube (216 colours)
+///   - 232–255: 24-step greyscale ramp
+///
+/// @param out  Output RGB array (3 bytes).
+/// @param idx  Colour index (clamped to 0–255).
 static void resolve_256(uint8_t out[3], int idx) {
   if (idx < 0) idx = 0;
   if (idx > 255) idx = 255;
@@ -230,6 +280,12 @@ static void resolve_256(uint8_t out[3], int idx) {
 // SGR colour handling
 // ---------------------------------------------------------------------------
 
+/// @brief Reset all SGR attributes to their defaults.
+///
+/// Foreground → {220,220,220}, background → {0,0,0} (transparent),
+/// bold and underline → false.
+///
+/// @param t  Terminal state.
 static void reset_sgr(terminal_t *t) {
   t->cur_fg[0] = default_fg[0]; t->cur_fg[1] = default_fg[1]; t->cur_fg[2] = default_fg[2];
   t->cur_bg[0] = default_bg[0]; t->cur_bg[1] = default_bg[1]; t->cur_bg[2] = default_bg[2];
@@ -237,6 +293,9 @@ static void reset_sgr(terminal_t *t) {
   t->cur_underline = false;
 }
 
+/// @brief Set foreground to a standard ANSI colour (codes 30–37).
+/// @param t    Terminal state.
+/// @param idx  0-based index into ansi_std[] (0 = black, 7 = white).
 static void set_fg(terminal_t *t, int idx) {
   if (idx >= 0 && idx < 8) {
     t->cur_fg[0] = ansi_std[idx][0];
@@ -245,6 +304,9 @@ static void set_fg(terminal_t *t, int idx) {
   }
 }
 
+/// @brief Set background to a standard ANSI colour (codes 40–47).
+/// @param t    Terminal state.
+/// @param idx  0-based index into ansi_std[].
 static void set_bg(terminal_t *t, int idx) {
   if (idx >= 0 && idx < 8) {
     t->cur_bg[0] = ansi_std[idx][0];
@@ -253,6 +315,9 @@ static void set_bg(terminal_t *t, int idx) {
   }
 }
 
+/// @brief Set foreground to a bright ANSI colour (codes 90–97).
+/// @param t    Terminal state.
+/// @param idx  0-based index into ansi_bright[].
 static void set_bright_fg(terminal_t *t, int idx) {
   if (idx >= 0 && idx < 8) {
     t->cur_fg[0] = ansi_bright[idx][0];
@@ -261,6 +326,9 @@ static void set_bright_fg(terminal_t *t, int idx) {
   }
 }
 
+/// @brief Set background to a bright ANSI colour (codes 100–107).
+/// @param t    Terminal state.
+/// @param idx  0-based index into ansi_bright[].
 static void set_bright_bg(terminal_t *t, int idx) {
   if (idx >= 0 && idx < 8) {
     t->cur_bg[0] = ansi_bright[idx][0];
@@ -270,9 +338,30 @@ static void set_bright_bg(terminal_t *t, int idx) {
 }
 
 // ---------------------------------------------------------------------------
-// CSI handler
+// CSI handler – processes Control Sequence Introducer (ESC [ ... ) sequences.
 // ---------------------------------------------------------------------------
 
+/// @brief Handle a complete CSI sequence.
+///
+/// Dispatches on the final byte to implement cursor movement (A/B/C/D/H/f),
+/// erase operations (J/K), save/restore cursor (s/u), SGR colour and
+/// attribute changes (m), and scroll (S/T).
+///
+/// SGR (final 'm') handles:
+///   - Standard colours: 30–37 (fg), 40–47 (bg)
+///   - Bright colours:   90–97 (fg), 100–107 (bg)
+///   - Extended colours: 38 (fg), 48 (bg), 58 (underline)
+///     - 38;5;N  / 38:5:N   → 256-colour indexed
+///     - 38;2;R;G;B / 38:2:R:G:B → 24-bit truecolor
+///   - Default resets: 39 (fg), 49 (bg)
+///   - Attributes: 0 (reset), 1 (bold), 4 (underline), 22/24 (off)
+///
+/// @param params             Numeric parameters (-1 = omitted).
+/// @param num_params         Number of valid entries in @p params.
+/// @param intermediates      Intermediate bytes (e.g. '?' for DEC private).
+/// @param num_intermediates  Number of intermediate bytes.
+/// @param final              Final byte of the CSI sequence (0x40–0x7E).
+/// @param ctx                Pointer to terminal_t.
 static void on_csi(int params[16], int num_params,
                    char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
@@ -442,6 +531,15 @@ static void on_csi(int params[16], int num_params,
 // ESC handler
 // ---------------------------------------------------------------------------
 
+/// @brief Handle a standalone ESC sequence (not CSI).
+///
+/// Implements DECSC/DECRC (save/restore cursor), IND (index), RI
+/// (reverse index), NEL (next line), RIS (reset), and HTS (tab set).
+///
+/// @param intermediates      Intermediate bytes.
+/// @param num_intermediates  Number of intermediates.
+/// @param final              Final byte of the ESC sequence.
+/// @param ctx                Pointer to terminal_t.
 static void on_esc(char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
   (void)intermediates; (void)num_intermediates;
@@ -485,10 +583,18 @@ static void on_esc(char intermediates[2], int num_intermediates,
   }
 }
 
+/// @brief OSC handler (Operating System Command) – currently a no-op.
+/// @param cmd  OSC command number.
+/// @param str  OSC string payload.
+/// @param ctx  Unused.
 static void on_osc(int cmd, const char *str, void *ctx) {
   (void)cmd; (void)str; (void)ctx;
 }
 
+/// @brief DCS handler (Device Control String) – currently a no-op.
+/// @param cmd  First parameter.
+/// @param str  DCS string payload.
+/// @param ctx  Unused.
 static void on_dcs(int cmd, const char *str, void *ctx) {
   (void)cmd; (void)str; (void)ctx;
 }
@@ -497,6 +603,12 @@ static void on_dcs(int cmd, const char *str, void *ctx) {
 // PTY helpers
 // ---------------------------------------------------------------------------
 
+/// @brief Fork a child process attached to a pseudo-terminal.
+///
+/// The child executes the user's login shell (SHELL env var, or /bin/sh).
+/// Returns the master file descriptor for communication.
+///
+/// @return Master PTY file descriptor, or -1 on failure.
 static int pty_fork(void) {
   int master_fd;
   struct winsize ws = {
@@ -517,6 +629,10 @@ static int pty_fork(void) {
   return master_fd;
 }
 
+/// @brief Notify the child of a terminal window size change.
+/// @param master_fd  Master PTY file descriptor.
+/// @param cols       New number of columns.
+/// @param rows       New number of rows.
 static void pty_resize(int master_fd, int cols, int rows) {
   struct winsize ws = {
     .ws_row = (unsigned short)rows,
@@ -531,6 +647,20 @@ static void pty_resize(int master_fd, int cols, int rows) {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// @brief Render a single terminal cell with its SGR colours and styles.
+///
+/// Draws an optional background rectangle if the cell has a non-default
+/// background colour, then renders the character glyph in the cell's
+/// foreground colour.  If bold is set the glyph is drawn twice with a
+/// 1 px horizontal offset (pseudo-bold).  If underline is set a
+/// horizontal line is drawn below the glyph.
+///
+/// @param font    Font handle (must be initialised).
+/// @param cell    Screen cell with character and colour attributes.
+/// @param x       Pixel X position of the cell.
+/// @param y       Pixel Y position of the cell.
+/// @param char_w  Character width in pixels.
+/// @param char_h  Character height in pixels.
 static void render_cell(font_handle_t *font, const screen_cell_t *cell,
                         float x, float y, float char_w, float char_h) {
   if (!font || !cell) return;

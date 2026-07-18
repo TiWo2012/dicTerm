@@ -1,3 +1,13 @@
+/**
+ * @file test_ansi_colors.c
+ * @brief Unit tests for ANSI SGR colour escape sequence parsing.
+ *
+ * Tests that the parser correctly extracts parameters from colour-
+ * related CSI sequences: standard/bright colours, 256-colour indexed
+ * mode, 24-bit truecolor, default resets, colon-separated sub-parameters,
+ * 8-bit CSI, and various edge cases.
+ */
+
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +157,7 @@ static void check_csi(const char *desc, const char *input,
 // Tests
 // ---------------------------------------------------------------------------
 
+/// @brief ESC[0m – reset all attributes.
 static void test_sgr_reset(void) {
   // ESC[0m – reset all attributes
   const char *input = "\x1B[0m";
@@ -174,68 +185,70 @@ static void test_sgr_reset(void) {
   assert(last_final == 'm');
 }
 
+/// @brief ESC[31m – set foreground to red.
 static void test_sgr_fg_red(void) {
   // ESC[31m – set foreground to red
   int expected[] = {31};
   check_csi("fg red", "\x1B[31m", expected, 1, 'm');
 }
 
+/// @brief ESC[42m – set background to green.
 static void test_sgr_bg_green(void) {
   // ESC[42m – set background to green
   int expected[] = {42};
   check_csi("bg green", "\x1B[42m", expected, 1, 'm');
 }
 
+/// @brief ESC[91m – bright red foreground (bright ANSI range).
 static void test_sgr_bright_fg(void) {
-  // ESC[91m – bright red foreground
   int expected[] = {91};
   check_csi("bright fg", "\x1B[91m", expected, 1, 'm');
 }
 
+/// @brief ESC[31;42m – multi-parameter SGR (red fg + green bg).
 static void test_sgr_multi(void) {
-  // ESC[31;42m – red fg + green bg
   int expected[] = {31, 42};
   check_csi("multi param", "\x1B[31;42m", expected, 2, 'm');
 }
 
+/// @brief ESC[0;31m – reset then set red foreground.
 static void test_sgr_bold_reset(void) {
-  // ESC[0;31m – reset then red
   int expected[] = {0, 31};
   check_csi("reset then red", "\x1B[0;31m", expected, 2, 'm');
 }
 
+/// @brief ESC[A – cursor up (default 1).
 static void test_csi_cursor_up(void) {
-  // ESC[A – cursor up (default 1)
   int expected[] = {-1}; // -1 means omitted
   check_csi("cursor up", "\x1B[A", expected, 1, 'A');
 }
 
+/// @brief ESC[3B – cursor down by 3 rows.
 static void test_csi_cursor_down_3(void) {
-  // ESC[3B – cursor down 3
   int expected[] = {3};
   check_csi("cursor down 3", "\x1B[3B", expected, 1, 'B');
 }
 
+/// @brief ESC[5;10H – cursor to row 5, column 10.
 static void test_csi_cursor_pos(void) {
-  // ESC[5;10H – cursor to row 5, col 10
   int expected[] = {5, 10};
   check_csi("cursor pos", "\x1B[5;10H", expected, 2, 'H');
 }
 
+/// @brief ESC[2J – erase entire display (ED mode 2).
 static void test_csi_erase_display(void) {
-  // ESC[2J – clear entire screen
   int expected[] = {2};
   check_csi("erase display", "\x1B[2J", expected, 1, 'J');
 }
 
+/// @brief ESC[K – erase line from cursor (EL mode 0, default).
 static void test_csi_erase_line(void) {
-  // ESC[K – erase line from cursor (default 0)
   int expected[] = {-1};
   check_csi("erase line", "\x1B[K", expected, 1, 'K');
 }
 
+/// @brief Test all 8 standard foreground colours (30–37).
 static void test_sgr_all_std_colors(void) {
-  // Test all 8 standard foreground colors
   for (int i = 30; i <= 37; i++) {
     char input[16];
     snprintf(input, sizeof(input), "\x1B[%dm", i);
@@ -244,6 +257,7 @@ static void test_sgr_all_std_colors(void) {
   }
 }
 
+/// @brief Test all 8 bright foreground colours (90–97).
 static void test_sgr_all_bright_colors(void) {
   for (int i = 90; i <= 97; i++) {
     char input[16];
@@ -253,6 +267,7 @@ static void test_sgr_all_bright_colors(void) {
   }
 }
 
+/// @brief Test all 8 background colours (40–47).
 static void test_sgr_all_bg_colors(void) {
   for (int i = 40; i <= 47; i++) {
     char input[16];
@@ -262,6 +277,7 @@ static void test_sgr_all_bg_colors(void) {
   }
 }
 
+/// @brief Verify that text printed immediately after an SGR sequence appears.
 static void test_print_after_sgr(void) {
   // Verify that text printed after an SGR sequence actually appears
   parser_t p;
@@ -287,14 +303,14 @@ static void test_print_after_sgr(void) {
   assert(print_ch == 'o');
 }
 
+/// @brief ESC[31;42;1m – red fg, green bg, bold combined.
 static void test_multiple_sgr(void) {
-  // ESC[31;42;1m – red fg, green bg, bold
   int expected[] = {31, 42, 1};
   check_csi("multi SGR", "\x1B[31;42;1m", expected, 3, 'm');
 }
 
+/// @brief ESC[m (no parameters) – equivalent to ESC[0m reset.
 static void test_no_param_sgr(void) {
-  // ESC[m (same as ESC[0m)
   parser_t p;
   parser_callbacks_t cbs = {
     .on_print   = cb_print,
@@ -320,7 +336,7 @@ static void test_no_param_sgr(void) {
   // The main.c handler checks num_params == 0 and treats it as reset
 }
 
-// This test verifies that the 8-bit CSI (0x9B) is also handled for SGR
+/// @brief 8-bit CSI (0x9B) SGR with red foreground.
 static void test_8bit_csi(void) {
   int expected[] = {31};
   check_csi("8-bit CSI SGR", "\x9B" "31m", expected, 1, 'm');
@@ -328,87 +344,88 @@ static void test_8bit_csi(void) {
 
 // ---- Extended colour (256-colour and truecolor) tests ----
 
+/// @brief ESC[38;5;10m – 256-colour foreground, index 10 (bright green).
 static void test_extended_fg_256(void) {
-  // ESC[38;5;10m – set fg to 256-colour index 10 (bright green)
   int expected[] = {38, 5, 10};
   check_csi("ext fg 256", "\x1B[38;5;10m", expected, 3, 'm');
 }
 
+/// @brief ESC[38;2;100;200;250m – 24-bit truecolor foreground.
 static void test_extended_fg_truecolor(void) {
-  // ESC[38;2;100;200;250m – set fg to RGB(100,200,250)
   int expected[] = {38, 2, 100, 200, 250};
   check_csi("ext fg truecolor", "\x1B[38;2;100;200;250m", expected, 5, 'm');
 }
 
+/// @brief ESC[48;5;20m – 256-colour background, index 20.
 static void test_extended_bg_256(void) {
-  // ESC[48;5;20m – set bg to 256-colour index 20
   int expected[] = {48, 5, 20};
   check_csi("ext bg 256", "\x1B[48;5;20m", expected, 3, 'm');
 }
 
+/// @brief ESC[48;2;10;20;30m – 24-bit truecolor background.
 static void test_extended_bg_truecolor(void) {
-  // ESC[48;2;10;20;30m – set bg to RGB(10,20,30)
   int expected[] = {48, 2, 10, 20, 30};
   check_csi("ext bg truecolor", "\x1B[48;2;10;20;30m", expected, 5, 'm');
 }
 
+/// @brief ESC[39m – reset foreground to terminal default.
 static void test_sgr_default_fg(void) {
-  // ESC[39m – reset foreground to default
   int expected[] = {39};
   check_csi("default fg", "\x1B[39m", expected, 1, 'm');
 }
 
+/// @brief ESC[49m – reset background to terminal default.
 static void test_sgr_default_bg(void) {
-  // ESC[49m – reset background to default
   int expected[] = {49};
   check_csi("default bg", "\x1B[49m", expected, 1, 'm');
 }
 
+/// @brief ESC[38;5;10;1m – 256-colour fg + bold combined.
 static void test_extended_then_bold(void) {
-  // ESC[38;5;10;1m – set fg to 256-colour 10, then bold
   int expected[] = {38, 5, 10, 1};
   check_csi("ext fg + bold", "\x1B[38;5;10;1m", expected, 4, 'm');
 }
 
+/// @brief Colon-separated sub-parameter syntax: ESC[38:5:10m.
 static void test_colon_subparam_256(void) {
-  // ESC[38:5:10m – colon-separated 256-colour (sub-parameter syntax)
   int expected[] = {38, 5, 10};
   check_csi("colon 256", "\x1B[38:5:10m", expected, 3, 'm');
 }
 
+/// @brief Colon-separated truecolor: ESC[38:2:100:200:250m.
 static void test_colon_subparam_truecolor(void) {
-  // ESC[38:2:100:200:250m – colon-separated truecolor
   int expected[] = {38, 2, 100, 200, 250};
   check_csi("colon truecolor", "\x1B[38:2:100:200:250m", expected, 5, 'm');
 }
 
+/// @brief Mixed semicolon and colon separators: ESC[38;5;10:1m.
 static void test_mixed_semicolon_colon(void) {
-  // ESC[38;5;10:1m – mixed semi/colon (should treat both as separators)
-  // parser: 38 ';' 5 ';' 10 ':' 1 'm' → params [38,5,10,1]
   int expected[] = {38, 5, 10, 1};
   check_csi("mixed separator", "\x1B[38;5;10:1m", expected, 4, 'm');
 }
 
+/// @brief ESC[58;5;100m – underline colour (code 58, 256-colour).
 static void test_underline_color(void) {
-  // ESC[58;5;100m – underline colour (code 58, 256-colour)
   int expected[] = {58, 5, 100};
   check_csi("underline 256", "\x1B[58;5;100m", expected, 3, 'm');
 }
 
 // ---- Colour-index edge cases ----
 
+/// @brief 256-colour index 0 (black).
 static void test_256_color_0(void) {
   int expected[] = {38, 5, 0};
   check_csi("256 index 0", "\x1B[38;5;0m", expected, 3, 'm');
 }
 
+/// @brief 256-colour index 255 (greyscale white).
 static void test_256_color_255(void) {
   int expected[] = {38, 5, 255};
   check_csi("256 index 255", "\x1B[38;5;255m", expected, 3, 'm');
 }
 
+/// @brief 256-colour index 231 – last colour in the 6×6×6 cube (white).
 static void test_256_color_231(void) {
-  // 231 = last cube colour (white)
   int expected[] = {38, 5, 231};
   check_csi("256 index 231", "\x1B[38;5;231m", expected, 3, 'm');
 }
