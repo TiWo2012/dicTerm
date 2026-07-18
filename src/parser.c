@@ -129,7 +129,7 @@ static void ground(parser_t *p, uint8_t b) {
     break;
   case 0x20 ... 0x7E:
     if (p->callbacks.on_print)
-      p->callbacks.on_print((char)b, p->ctx);
+      p->callbacks.on_print(b, p->ctx);
     break;
   case 0x7F: // DEL – ignore
     break;
@@ -166,6 +166,10 @@ static void ground(parser_t *p, uint8_t b) {
     p->string_len = 0;
     break;
   default:
+    // Pass through bytes >= 0x80 as printable (UTF-8 multi-byte sequences,
+    // Nerd Font icons, etc.).
+    if (b >= 0x80 && p->callbacks.on_print)
+      p->callbacks.on_print(b, p->ctx);
     break;
   }
 }

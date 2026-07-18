@@ -19,8 +19,8 @@
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  // Called for printable ASCII characters (0x20 – 0x7E).
-  void (*on_print)(char ch, void *ctx);
+  // Called for printable characters (0x20-0x7E ASCII, 0x80+ UTF-8).
+  void (*on_print)(uint8_t ch, void *ctx);
 
   // Called for C0 control characters (0x00 – 0x1F, except ESC 0x1B).
   void (*on_execute)(char c0, void *ctx);

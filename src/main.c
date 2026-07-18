@@ -27,7 +27,7 @@
 // Terminal state
 // ---------------------------------------------------------------------------
 typedef struct {
-  char       screen[ROWS][COLS];
+  uint8_t    screen[ROWS][COLS];
   int        cx, cy;
   int        saved_cx, saved_cy;
   parser_t   parser;
@@ -41,7 +41,7 @@ typedef struct {
 // Screen helpers
 // ---------------------------------------------------------------------------
 static void scroll_up(terminal_t *t) {
-  scrollback_push(t->scrollback, t->screen[0]);
+  scrollback_push(t->scrollback, (const char *)t->screen[0]);
   for (int i = 0; i < ROWS - 1; i++)
     memcpy(t->screen[i], t->screen[i + 1], COLS);
   memset(t->screen[ROWS - 1], ' ', COLS);
@@ -88,7 +88,7 @@ static void erase_line(terminal_t *t, int mode) {
 // ---------------------------------------------------------------------------
 // Parser callbacks
 // ---------------------------------------------------------------------------
-static void on_print(char ch, void *ctx) {
+static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
   if (t->cx >= COLS || t->cy >= ROWS) return;
   t->screen[t->cy][t->cx++] = ch;
@@ -368,7 +368,7 @@ int main(void) {
       memcpy(line, term.screen[r], COLS);
       line[COLS] = '\0';
       float y = (float)WIN_PADDING + (float)r * char_h;
-      font_render_line(font, line, COLS, (float)WIN_PADDING, y, fg, bg);
+      font_render_line(font, (const char *)line, COLS, (float)WIN_PADDING, y, fg, bg);
     }
 
     // Cursor: inverted block
@@ -378,9 +378,9 @@ int main(void) {
       DrawRectangle((int)cx, (int)cy, (int)char_w, (int)char_h,
                     (Color){ 220, 220, 220, 180 });
 
-      char cc = term.screen[term.cy][term.cx];
+      unsigned char cc = term.screen[term.cy][term.cx];
       if (cc < 0x20) cc = ' ';
-      int cp[1] = { (int)(unsigned char)cc };
+      int cp[1] = { (int)cc };
       DrawTextCodepoints(*font->current, cp, 1,
                          (Vector2){ cx, cy + font->ascent },
                          font->font_size, font->spacing,

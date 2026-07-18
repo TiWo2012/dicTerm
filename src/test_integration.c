@@ -120,7 +120,7 @@ static void clamp_cursor(terminal_t *t) {
 // Parser callbacks (same as main.c)
 // ---------------------------------------------------------------------------
 
-static void on_print(char ch, void *ctx) {
+static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
   t->screen[t->cy][t->cx] = ch;
   t->cx++;

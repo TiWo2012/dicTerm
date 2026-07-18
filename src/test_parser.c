@@ -107,7 +107,7 @@ static event_t *mock_next(mock_ctx_t *m) {
   return &m->events[m->count++];
 }
 
-static void on_print(char ch, void *ctx) {
+static void on_print(uint8_t ch, void *ctx) {
   mock_ctx_t *m = (mock_ctx_t *)ctx;
   event_t *e = mock_next(m);
   if (!e) return;

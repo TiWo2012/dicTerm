@@ -440,10 +440,25 @@ void font_render_line(font_handle_t *handle, const char *line, int cols,
     int codepoints[512];
 
     int count = 0;
-    for (int i = 0; i < cols && count < 512; i++) {
+    int i = 0;
+    while (i < cols && count < 512) {
         unsigned char ch = (unsigned char)line[i];
-        if (ch < 0x20 && ch != '\t') ch = ' ';
-        codepoints[count++] = (int)ch;
+        if (ch < 0x20 && ch != '\t') {
+            codepoints[count++] = ' ';
+            i++;
+        } else if (ch < 0x80) {
+            // ASCII
+            codepoints[count++] = ch;
+            i++;
+        } else {
+            // Multi-byte UTF-8: decode using raylib
+            int codepointSize = 0;
+            int cp = GetCodepointNext(&line[i], &codepointSize);
+            if (codepointSize <= 0) codepointSize = 1;
+            if (cp == 0) cp = ' ';
+            codepoints[count++] = cp;
+            i += codepointSize;
+        }
     }
 
     if (count == 0) return;
@@ -465,10 +480,23 @@ float font_measure_text(font_handle_t *handle, const char *text, int len) {
 
     int codepoints[512];
     int count = 0;
-    for (int i = 0; i < len && count < 512; i++) {
+    int i = 0;
+    while (i < len && count < 512) {
         unsigned char ch = (unsigned char)text[i];
-        if (ch < 0x20 && ch != '\t') ch = ' ';
-        codepoints[count++] = (int)ch;
+        if (ch < 0x20 && ch != '\t') {
+            codepoints[count++] = ' ';
+            i++;
+        } else if (ch < 0x80) {
+            codepoints[count++] = ch;
+            i++;
+        } else {
+            int codepointSize = 0;
+            int cp = GetCodepointNext(&text[i], &codepointSize);
+            if (codepointSize <= 0) codepointSize = 1;
+            if (cp == 0) cp = ' ';
+            codepoints[count++] = cp;
+            i += codepointSize;
+        }
     }
 
     if (count == 0) return 0;

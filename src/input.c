@@ -216,10 +216,6 @@ int key_to_seq(int raylib_key, bool shift, bool ctrl, bool alt,
     APPEND('+');
     break;
 
-  // ---- Space ----
-  case KEY_SPACE:
-    APPEND(' ');
-    break;
 
   default:
     // If we reach here and the key is a letter/digit that wasn't handled
