@@ -1,0 +1,424 @@
+Start testing: Jul 19 13:54 CEST
+----------------------------------------------------------
+1/9 Testing: test_parser
+1/9 Test: test_parser
+Command: "/home/timo/Projects/dicTerm/build-rel/test_parser"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_parser" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+parser test suite
+=================
+
+  test: print_ascii                                      ok
+  test: c0_execute                                       ok
+  test: all_c0_controls                                  ok
+  test: can_sub_in_ground                                ok
+  test: del_ignored                                      ok
+  test: high_bytes_print                                 ok
+  test: esc_simple                                       ok
+  test: esc_escape_resets                                ok
+  test: esc_intermediates                                ok
+  test: esc_multi_intermediates                          ok
+  test: esc_can_sub_abort                                ok
+  test: csi_simple                                       ok
+  test: csi_single_param                                 ok
+  test: csi_multi_param                                  ok
+  test: csi_omitted_params                               ok
+  test: csi_multi_digit_param                            ok
+  test: csi_colon_subparam                               ok
+  test: csi_private_marker                               ok
+  test: csi_intermediate                                 ok
+  test: csi_sgr                                          ok
+  test: csi_can_sub_abort                                ok
+  test: csi_esc_restart                                  ok
+  test: csi_max_params                                   ok
+  test: csi_large_param                                  ok
+  test: csi_leading_zeros                                ok
+  test: csi_private_and_intermediate                     ok
+  test: osc_bel_terminated                               ok
+  test: osc_st_terminated                                ok
+  test: osc_8bit_st_terminated                           ok
+  test: osc_multi_digit_command                          ok
+  test: osc_3digit_command                               ok
+  test: osc_no_semicolon                                 ok
+  test: osc_no_command                                   ok
+  test: osc_abort_can                                    ok
+  test: dcs_st_terminated                                ok
+  test: dcs_8bit_st                                      ok
+  test: dcs_bel_terminated                               ok
+  test: dcs_empty                                        ok
+  test: dcs_with_command                                 ok
+  test: sos_st_terminated                                ok
+  test: pm_st_terminated                                 ok
+  test: apc_st_terminated                                ok
+  test: 8bit_csi                                         ok
+  test: 8bit_osc                                         ok
+  test: 8bit_dcs                                         ok
+  test: 8bit_sos_pm_apc                                  ok
+  test: invalid_byte_resets                              ok
+  test: csi_invalid_byte                                 ok
+  test: esc_intermediate_then_invalid                    ok
+  test: reset_api                                        ok
+  test: osc_buffer_overflow                              ok
+  test: osc_st_with_full_buffer                          ok
+  test: prompt_sequence                                  ok
+  test: cursor_movement_sequence                         ok
+  test: erase_sequences                                  ok
+  test: save_restore_cursor                              ok
+  test: null_callbacks                                   ok
+  test: print_after_esc_abort                            ok
+  test: rapid_esc_print_alternation                      ok
+
+=================
+results: 59 / 59 passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_parser" end time: Jul 19 13:54 CEST
+"test_parser" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/9 Testing: test_config
+2/9 Test: test_config
+Command: "/home/timo/Projects/dicTerm/build-rel/test_config"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_config" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+config tests:
+  load defaults ... OK
+  parse full ... OK
+  unknown keys ignored ... OK
+  comments/whitespace ... OK
+  invalid numeric bounds ... OK
+  invalid rgb ... OK
+  missing file ... OK
+
+7 / 7 tests passed.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_config" end time: Jul 19 13:54 CEST
+"test_config" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/9 Testing: test_scrollback
+3/9 Test: test_scrollback
+Command: "/home/timo/Projects/dicTerm/build-rel/test_scrollback"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_scrollback" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+scrollback test suite
+=====================
+
+  test: create_destroy                                   ok
+  test: create_null_on_bad_args                          ok
+  test: push_and_get                                     ok
+  test: wrap_around                                      ok
+  test: clear                                            ok
+  test: reset                                            ok
+  test: null_safety                                      ok
+  test: exact_capacity                                   ok
+  test: partial_out_buffer                               ok
+  test: capacity_one                                     ok
+  test: cols_one                                         ok
+  test: stress_sequential                                ok
+  test: interleaved_push_get                             ok
+  test: viewport_indexing                                ok
+  test: offset_clamping                                  ok
+  test: get_after_clear_and_repush                       ok
+  test: many_wrap_arounds                                ok
+  test: push_null_line                                   ok
+
+=================
+results: 18 / 18 passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_scrollback" end time: Jul 19 13:54 CEST
+"test_scrollback" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/9 Testing: test_screen
+4/9 Test: test_screen
+Command: "/home/timo/Projects/dicTerm/build-rel/test_screen"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_screen" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+screen buffer tests:
+  new/free ... OK
+  new invalid args ... OK
+  free NULL ... OK
+  put and cell ... OK
+  put/cell NULL ... OK
+  apply SGR ... OK
+  apply SGR NULL ... OK
+  apply SGR OOB ... OK
+  clear row ... OK
+  clear row edge ... OK
+  erase display mode 0 ... OK
+  erase display mode 1 ... OK
+  erase display mode 2 ... OK
+  erase display mode 2 reset ... OK
+  erase display NULL ... OK
+  erase line ... OK
+  erase line mode 1 ... OK
+  erase line edge ... OK
+  put preserves attrs ... OK
+  multi-cell ops ... OK
+
+20 / 20 tests passed.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_screen" end time: Jul 19 13:54 CEST
+"test_screen" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/9 Testing: test_ansi_colors
+5/9 Test: test_ansi_colors
+Command: "/home/timo/Projects/dicTerm/build-rel/test_ansi_colors"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_ansi_colors" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+ANSI colour / SGR parser tests:
+  SGR reset (0) ... OK
+  SGR fg red (31) ... OK
+  SGR bg green (42) ... OK
+  SGR bright fg (91) ... OK
+  SGR multi param (31;42) ... OK
+  SGR bold+reset (0;31) ... OK
+  CSI cursor up ... OK
+  CSI cursor down 3 ... OK
+  CSI cursor pos ... OK
+  CSI erase display ... OK
+  CSI erase line ... OK
+  SGR all standard fg (30-37) ... OK
+  SGR all bright fg (90-97) ... OK
+  SGR all bg (40-47) ... OK
+  print after SGR ... OK
+  multiple SGR (31;42;1) ... OK
+  no-param SGR (ESC[m) ... OK
+  7-bit CSI SGR ... OK
+  ext fg 256 (38;5;10) ... OK
+  ext fg truecolor (38;2;R;G;B) ... OK
+  ext bg 256 (48;5;20) ... OK
+  ext bg truecolor (48;2;R;G;B) ... OK
+  default fg (39) ... OK
+  default bg (49) ... OK
+  ext fg + bold (38;5;10;1) ... OK
+  colon sub-param 256 (38:5:10) ... OK
+  colon sub-param truecolor ... OK
+  mixed separator (38;5;10:1) ... OK
+  underline colour (58;5;100) ... OK
+  256 index 0 (38;5;0) ... OK
+  256 index 255 (38;5;255) ... OK
+  256 index 231 (38;5;231) ... OK
+
+32 / 32 tests passed.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_ansi_colors" end time: Jul 19 13:54 CEST
+"test_ansi_colors" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/9 Testing: test_integration
+6/9 Test: test_integration
+Command: "/home/timo/Projects/dicTerm/build-rel/test_integration"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_integration" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+integration test suite
+=====================
+
+  test: shell_prompt_full_sequence                       ok
+  test: shell_prompt_then_user_input                     ok
+  test: command_output_multiple_lines                    ok
+  test: output_without_clear                             ok
+  test: cursor_movement_overlay                          ok
+  test: rapid_cursor_and_print                           ok
+  test: editor_like_ui                                   ok
+  test: long_scrolling_output                            ok
+  test: progress_bar_update                              ok
+  test: osc_interleaved_with_text                        ok
+  test: multiple_osc_in_sequence                         ok
+  test: scrollback_with_ed_erase                         ok
+  test: scrollback_with_ris                              ok
+  test: backspace_erase_and_rewrite                      ok
+  test: multiple_tabs                                    ok
+  test: tab_at_line_end                                  ok
+  test: null_callbacks_do_not_crash                      ok
+  test: nel_scroll                                       ok
+  test: ri_scroll_at_top                                 ok
+  test: stress_mixed_sequences                           ok
+  test: crlf_vs_separate                                 ok
+  test: very_long_line                                   ok
+
+=================
+results: 22 / 22 passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_integration" end time: Jul 19 13:54 CEST
+"test_integration" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/9 Testing: test_terminal
+7/9 Test: test_terminal
+Command: "/home/timo/Projects/dicTerm/build-rel/test_terminal"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_terminal" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+terminal full document test suite
+=================================
+
+  test: print_single_char                                ok
+  test: print_multiple_chars                             ok
+  test: print_full_width                                 ok
+  test: print_and_scroll                                 ok
+  test: newline_moves_down                               ok
+  test: carriage_return                                  ok
+  test: tab_stops                                        ok
+  test: backspace                                        ok
+  test: backspace_at_edge                                ok
+  test: cuu_cursor_up                                    ok
+  test: cud_cursor_down                                  ok
+  test: cuf_cursor_forward                               ok
+  test: cub_cursor_back                                  ok
+  test: cup_cursor_position                              ok
+  test: cup_defaults_to_1_1                              ok
+  test: hvp_equivalent_to_cup                            ok
+  test: clamp_cursor_bounds                              ok
+  test: el_erase_to_end_of_line                          ok
+  test: el_erase_to_start_of_line                        ok
+  test: el_erase_entire_line                             ok
+  test: ed_erase_to_end_of_screen                        ok
+  test: ed_erase_to_start_of_screen                      ok
+  test: ed_erase_entire_screen                           ok
+  test: ed_erase_screen_and_scrollback                   ok
+  test: csi_save_restore_cursor                          ok
+  test: esc_decsc_decrc                                  ok
+  test: esc_ind_index                                    ok
+  test: esc_ri_reverse_index                             ok
+  test: esc_nel_next_line                                ok
+  test: esc_ris_reset                                    ok
+  test: scrollback_populated_on_scroll                   ok
+  test: scrollback_preserves_content                     ok
+  test: scrollback_ring_wrap                             ok
+  test: write_then_erase_then_write                      ok
+  test: multi_line_edit                                  ok
+  test: line_wrap_with_long_line                         ok
+  test: scroll_at_bottom_with_newline                    ok
+  test: scroll_at_bottom_with_print                      ok
+  test: empty_input                                      ok
+  test: rapid_sequences                                  ok
+  test: no_scrollback_does_not_crash                     ok
+
+=================================
+results: 41 / 41 passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_terminal" end time: Jul 19 13:54 CEST
+"test_terminal" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/9 Testing: test_input
+8/9 Test: test_input
+Command: "/home/timo/Projects/dicTerm/build-rel/test_input"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_input" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+input test suite
+================
+
+  test: ctrl_a_to_z                                      ok
+  test: enter                                            ok
+  test: kp_enter                                         ok
+  test: tab                                              ok
+  test: backspace                                        ok
+  test: escape                                           ok
+  test: escape_with_alt                                  ok
+  test: up                                               ok
+  test: down                                             ok
+  test: right                                            ok
+  test: left                                             ok
+  test: ctrl_up                                          ok
+  test: ctrl_down                                        ok
+  test: ctrl_right                                       ok
+  test: ctrl_left                                        ok
+  test: alt_up                                           ok
+  test: alt_down                                         ok
+  test: home                                             ok
+  test: end                                              ok
+  test: page_up                                          ok
+  test: page_down                                        ok
+  test: insert                                           ok
+  test: delete                                           ok
+  test: f1_to_f4                                         ok
+  test: f5_to_f12                                        ok
+  test: kp_digits                                        ok
+  test: kp_operators                                     ok
+  test: alt_letter                                       ok
+  test: alt_ctrl_non_printable                           ok
+  test: unmapped_key                                     ok
+  test: shift_arrow                                      ok
+  test: sequence_does_not_exceed_max                     ok
+
+================
+results: 32 / 32 passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_input" end time: Jul 19 13:54 CEST
+"test_input" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/9 Testing: test_font_codepoints
+9/9 Test: test_font_codepoints
+Command: "/home/timo/Projects/dicTerm/build-rel/test_font_codepoints"
+Directory: /home/timo/Projects/dicTerm/build-rel
+"test_font_codepoints" start time: Jul 19 13:54 CEST
+Output:
+----------------------------------------------------------
+font codepoint list tests
+=========================
+
+  test: ascii_only                                       ok
+  test: with_nerd                                        ok
+  test: small_buffer                                     ok
+  test: zero_buffer                                      ok
+  test: exact_ascii_buffer                               ok
+  test: exact_total_buffer                               ok
+  test: no_duplicates                                    ok
+  test: buffer_size_one                                  ok
+  test: nerd_range_boundaries                            ok
+  test: nerd_count_matches_ranges                        ok
+
+=========================
+results: 10 / 10 passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_font_codepoints" end time: Jul 19 13:54 CEST
+"test_font_codepoints" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Jul 19 13:54 CEST

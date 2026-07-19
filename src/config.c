@@ -26,7 +26,7 @@
 #define DEFAULT_WIN_WIDTH          1280
 #define DEFAULT_WIN_HEIGHT         800
 #define DEFAULT_WIN_PADDING        10
-#define DEFAULT_FONT_SIZE          20.0f
+#define DEFAULT_FONT_SIZE          11.0f
 #define DEFAULT_FG_R 220
 #define DEFAULT_FG_G 220
 #define DEFAULT_FG_B 220

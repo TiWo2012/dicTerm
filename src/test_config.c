@@ -48,7 +48,7 @@ static void test_load_defaults(void) {
   assert(cfg.win_width == 1280);
   assert(cfg.win_height == 800);
   assert(cfg.win_padding == 10);
-  assert(cfg.font_size > 19.9f && cfg.font_size < 20.1f);
+  assert(cfg.font_size > 10.9f && cfg.font_size < 11.1f);
   assert(cfg.default_fg[0] == 220 && cfg.default_fg[1] == 220 && cfg.default_fg[2] == 220);
   assert(cfg.default_bg[0] == 0 && cfg.default_bg[1] == 0 && cfg.default_bg[2] == 0);
   assert(cfg.font_regular[0] == '\0');
@@ -185,7 +185,7 @@ static void test_invalid_numeric_bounds(void) {
   assert(ok);
   assert(cfg.rows == 36);      // rejected → default
   assert(cfg.cols == 100);     // rejected → default
-  assert(cfg.font_size > 19.9f && cfg.font_size < 20.1f);
+  assert(cfg.font_size > 10.9f && cfg.font_size < 11.1f);
   assert(cfg.win_width == 1280);
   assert(cfg.win_padding == 10);
   USE(ok);

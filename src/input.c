@@ -1,7 +1,15 @@
+/**
+ * @file input.c
+ * @brief Keyboard input implementation.
+ *
+ * Converts raylib key events into terminal escape sequences and writes
+ * them to the master end of a PTY.  Handles printable characters (via
+ * GetCharPressed), C0 controls (Ctrl+letter), cursor keys, function keys,
+ * keypad, and modifier combinations (Ctrl, Alt, Shift).
+ */
 #include "input.h"
 
 #include <errno.h>
-#include <raylib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -30,6 +38,20 @@ static int write_all(int fd, const uint8_t *buf, int len) {
   return total;
 }
 
+/**
+ * @brief Convert a raylib key event to a terminal byte sequence.
+ *
+ * Handles Ctrl+letter (→ 0x01–0x1A), Alt+key (→ ESC prefix + key),
+ * arrow keys (with Ctrl modifier), Home/End, Page Up/Down, Insert/Delete,
+ * function keys (xterm-style), and keypad digits/operators.
+ *
+ * @param raylib_key  The raylib key constant (KEY_A, KEY_UP, ...).
+ * @param shift       Whether Shift is held (currently unused for special keys).
+ * @param ctrl        Whether Ctrl is held.
+ * @param alt         Whether Alt is held.
+ * @param out         Output buffer (INPUT_MAX_SEQ bytes), zeroed on entry.
+ * @return            Number of bytes written to out (0 if unmapped).
+ */
 int key_to_seq(int raylib_key, bool shift, bool ctrl, bool alt,
                uint8_t out[INPUT_MAX_SEQ]) {
   (void)shift;
@@ -232,9 +254,60 @@ done:
 }
 
 // ---------------------------------------------------------------------------
-// Poll raylib and write all pending key events to fd
+// GLFW event queue and PTY forwarding
 // ---------------------------------------------------------------------------
 
+static GLFWwindow *input_window;
+static int key_queue[256];
+static int key_queue_count;
+static unsigned int char_queue[256];
+static int char_queue_count;
+static bool pressed[GLFW_KEY_LAST + 1];
+
+static void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods) {
+  (void)window; (void)scancode; (void)mods;
+  if (key >= 0 && key <= GLFW_KEY_LAST && action == GLFW_PRESS) pressed[key] = true;
+  if (action == GLFW_PRESS && key_queue_count < 256) key_queue[key_queue_count++] = key;
+}
+
+static void char_callback(GLFWwindow *window, unsigned int codepoint) {
+  (void)window;
+  if (char_queue_count < 256) char_queue[char_queue_count++] = codepoint;
+}
+
+void input_init(GLFWwindow *window) {
+  input_window = window;
+  glfwSetKeyCallback(window, key_callback);
+  glfwSetCharCallback(window, char_callback);
+}
+
+bool input_key_pressed(int key) {
+  bool value = key >= 0 && key <= GLFW_KEY_LAST && pressed[key];
+  if (key >= 0 && key <= GLFW_KEY_LAST) pressed[key] = false;
+  return value;
+}
+
+bool input_key_down(int key) {
+  return input_window && glfwGetKey(input_window, key) == GLFW_PRESS;
+}
+
+/**
+ * @brief Poll raylib and write all pending key events to a file descriptor.
+ *
+ * Two-phase processing:
+ *   1. Printable characters via GetCharPressed() — handles letters, digits,
+ *      symbols with proper Shift/Caps state.  C0 controls and DEL are
+ *      skipped (they come via GetKeyPressed instead).
+ *   2. Non-character and control keys via GetKeyPressed() — delegates to
+ *      key_to_seq() for each pressed key.
+ *
+ * Scroll keys (Page Up/Down, Shift+Up/Down) are intentionally NOT
+ * forwarded to the PTY — they are handled locally by the scrollback
+ * viewport logic in main.c.
+ *
+ * @param fd  File descriptor to write to (master end of PTY).
+ * @return    Total bytes written, or -1 on write error.
+ */
 int process_keyboard_input(int fd) {
   int total_written = 0;
   uint8_t seq[INPUT_MAX_SEQ];
@@ -246,9 +319,9 @@ int process_keyboard_input(int fd) {
   //    here to avoid double-emitting them when GetKeyPressed() also
   //    reports them.  They are instead processed in step 2.
   // ---------------------------------------------------------------
-  int safety = 256;
-  int c;
-  while ((c = GetCharPressed()) > 0 && safety-- > 0) {
+  int safety = char_queue_count;
+  for (int qi = 0; qi < safety; qi++) {
+    int c = (int)char_queue[qi];
     // Skip C0 controls (0x00-0x1F) and DEL (0x7F) — these come via
     // GetKeyPressed() instead.
     if ((c < 0x20 && c != '\n') || c == 0x7F)
@@ -278,7 +351,7 @@ int process_keyboard_input(int fd) {
 
     if (utf8_len > 0) {
       // Alt prefix
-      bool alt_held = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+      bool alt_held = input_key_down(KEY_LEFT_ALT) || input_key_down(KEY_RIGHT_ALT);
       if (alt_held) {
         uint8_t alt_buf[INPUT_MAX_SEQ];
         int alt_pos = 0;
@@ -299,13 +372,12 @@ int process_keyboard_input(int fd) {
   // 2. Non-character and control keys via GetKeyPressed()
   // ---------------------------------------------------------------
   bool shift_held, ctrl_held, alt_held;
-
-  int key;
-  while ((key = GetKeyPressed()) != 0) {
+  for (int qi = 0; qi < key_queue_count; qi++) {
+    int key = key_queue[qi];
     // Check modifiers at the time of this poll.
-    shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    ctrl_held  = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    alt_held   = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    shift_held = input_key_down(KEY_LEFT_SHIFT) || input_key_down(KEY_RIGHT_SHIFT);
+    ctrl_held  = input_key_down(KEY_LEFT_CONTROL) || input_key_down(KEY_RIGHT_CONTROL);
+    alt_held   = input_key_down(KEY_LEFT_ALT) || input_key_down(KEY_RIGHT_ALT);
 
     // Scroll keys are handled locally in main.c – do NOT forward to PTY.
     if (key == KEY_PAGE_UP || key == KEY_PAGE_DOWN ||
@@ -319,5 +391,7 @@ int process_keyboard_input(int fd) {
     }
   }
 
+  char_queue_count = 0;
+  key_queue_count = 0;
   return total_written;
 }

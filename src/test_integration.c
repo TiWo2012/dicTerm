@@ -15,6 +15,7 @@
 #include "scrollback.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,7 +80,7 @@ static int tests_passed = 0;
 // ---------------------------------------------------------------------------
 
 typedef struct {
-  char screen[ROWS][COLS];
+  int screen[ROWS][COLS];
   int cx, cy;
   int saved_cx, saved_cy;
   parser_t parser;
@@ -90,23 +91,27 @@ static void scroll_up(terminal_t *t) {
   if (t->scrollback)
     scrollback_push(t->scrollback, t->screen[0]);
   for (int i = 0; i < ROWS - 1; i++)
-    memcpy(t->screen[i], t->screen[i + 1], COLS);
-  memset(t->screen[ROWS - 1], ' ', COLS);
+    memcpy(t->screen[i], t->screen[i + 1], COLS * sizeof(int));
+  for (int c = 0; c < COLS; c++)
+    t->screen[ROWS - 1][c] = ' ';
 }
 
-static void clear_screen(char screen[ROWS][COLS]) {
+static void clear_screen(int screen[ROWS][COLS]) {
   for (int r = 0; r < ROWS; r++)
-    memset(screen[r], ' ', COLS);
+    for (int c = 0; c < COLS; c++)
+      screen[r][c] = ' ';
 }
 
-static void clear_line(char screen[ROWS][COLS], int row, int col_start) {
+static void clear_line(int screen[ROWS][COLS], int row, int col_start) {
   if (row >= 0 && row < ROWS)
-    memset(screen[row] + col_start, ' ', (size_t)(COLS - col_start));
+    for (int c = col_start; c < COLS; c++)
+      screen[row][c] = ' ';
 }
 
-static void clear_line_all(char screen[ROWS][COLS], int row) {
+static void clear_line_all(int screen[ROWS][COLS], int row) {
   if (row >= 0 && row < ROWS)
-    memset(screen[row], ' ', COLS);
+    for (int c = 0; c < COLS; c++)
+      screen[row][c] = ' ';
 }
 
 static void clamp_cursor(terminal_t *t) {
@@ -120,7 +125,7 @@ static void clamp_cursor(terminal_t *t) {
 // Parser callbacks (same as main.c)
 // ---------------------------------------------------------------------------
 
-static void on_print(char ch, void *ctx) {
+static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
   t->screen[t->cy][t->cx] = ch;
   t->cx++;
@@ -216,13 +221,16 @@ static void on_csi(int params[PARSER_MAX_PARAMS], int num_params,
     case 0:
       clear_line(t->screen, t->cy, t->cx);
       for (int r = t->cy + 1; r < ROWS; r++)
-        memset(t->screen[r], ' ', COLS);
+        for (int c = 0; c < COLS; c++)
+          t->screen[r][c] = ' ';
       break;
     case 1:
       // Erase from start of display through the cursor position.
-      memset(t->screen[t->cy], ' ', (size_t)(t->cx + 1));
+      for (int c = 0; c <= t->cx; c++)
+        t->screen[t->cy][c] = ' ';
       for (int r = 0; r < t->cy; r++)
-        memset(t->screen[r], ' ', COLS);
+        for (int c = 0; c < COLS; c++)
+          t->screen[r][c] = ' ';
       break;
     case 2:
       clear_screen(t->screen);
@@ -231,6 +239,8 @@ static void on_csi(int params[PARSER_MAX_PARAMS], int num_params,
       clear_screen(t->screen);
       if (t->scrollback)
         scrollback_clear(t->scrollback);
+      break;
+    default:
       break;
     }
     break;
@@ -243,10 +253,13 @@ static void on_csi(int params[PARSER_MAX_PARAMS], int num_params,
       clear_line(t->screen, t->cy, t->cx);
       break;
     case 1:
-      memset(t->screen[t->cy], ' ', (size_t)(t->cx + 1));
+      for (int c = 0; c <= t->cx; c++)
+        t->screen[t->cy][c] = ' ';
       break;
     case 2:
       clear_line_all(t->screen, t->cy);
+      break;
+    default:
       break;
     }
     break;
@@ -287,8 +300,9 @@ static void on_esc(char intermediates[PARSER_MAX_INTERMEDIATES],
       t->cy--;
       if (t->cy < 0) {
         for (int r = ROWS - 1; r > 0; r--)
-          memcpy(t->screen[r], t->screen[r - 1], COLS);
-        memset(t->screen[0], ' ', COLS);
+          memcpy(t->screen[r], t->screen[r - 1], (size_t)COLS * sizeof(int));
+        for (int c = 0; c < COLS; c++)
+          t->screen[0][c] = ' ';
         t->cy = 0;
       }
       break;
@@ -351,7 +365,8 @@ static parser_callbacks_t s_callbacks = {
 static void term_init(terminal_t *t, int sb_cap) {
   memset(t, 0, sizeof(*t));
   for (int r = 0; r < ROWS; r++)
-    memset(t->screen[r], ' ', COLS);
+    for (int c = 0; c < COLS; c++)
+      t->screen[r][c] = ' ';
   t->scrollback = (sb_cap > 0) ? scrollback_create(sb_cap, COLS) : NULL;
   parser_init(&t->parser, &s_callbacks, t);
 }
@@ -656,14 +671,16 @@ static bool test_long_scrolling_output(void) {
   // scrollback entry (pushed by line 99's \n) is line 99-35 = 64.
   int most_recent_scrolled = 99 - (ROWS - 1);
   char sb_expected[64];
-  snprintf(sb_expected, sizeof(sb_expected),
-           "[%04d] output line number %d", most_recent_scrolled,
-           most_recent_scrolled);
-  char sb_line[COLS];
+  int sb_expected_len = snprintf(sb_expected, sizeof(sb_expected),
+                                  "[%04d] output line number %d",
+                                  most_recent_scrolled,
+                                  most_recent_scrolled);
+  int sb_line[COLS];
   ASSERT(scrollback_get(t.scrollback, 0, sb_line, COLS),
          "got most recent scrollback entry");
-  ASSERT_INT_EQ(memcmp(sb_line, sb_expected, strlen(sb_expected)), 0,
-                "most recent scrollback matches");
+  for (int i = 0; i < sb_expected_len && i < COLS; i++)
+    ASSERT_INT_EQ(sb_line[i], (unsigned char)sb_expected[i],
+                  "most recent scrollback char matches");
 
   // Total pushed = scrolls at lines 35 through 99 = 99-35+1 = 65.
   ASSERT_INT_EQ(scrollback_total_pushed(t.scrollback), 100 - ROWS + 1,
@@ -965,7 +982,7 @@ static bool test_stress_mixed_sequences(void) {
   // Check that all screen bytes are valid printable ASCII or spaces.
   for (int r = 0; r < ROWS; r++) {
     for (int c = 0; c < COLS; c++) {
-      char ch = t.screen[r][c];
+      int ch = t.screen[r][c];
       ASSERT((ch >= 0x20 && ch <= 0x7E) || ch == ' ',
              "screen contains only printable chars or spaces");
     }

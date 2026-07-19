@@ -32,9 +32,13 @@
  * Colour components are stored as 8-bit RGB values.  A foreground of
  * {0,0,0} means "use the terminal default foreground"; a background
  * of {0,0,0} means "transparent" (the window background shows through).
+ *
+ * The character is stored as a decoded Unicode codepoint (int).
+ * Values 0-127 represent ASCII; values > 127 represent arbitrary
+ * Unicode including Nerd Font PUA icons.
  */
 typedef struct {
-  uint8_t ch;               ///< Character byte (7-bit ASCII or UTF-8 leader).
+  int   ch;                 ///< Unicode codepoint (decoded from UTF-8).
   uint8_t fg[3];            ///< RGB foreground colour (0 = default).
   uint8_t bg[3];            ///< RGB background colour (0 = transparent).
   uint8_t bold : 1;         ///< Bold attribute.
@@ -100,6 +104,21 @@ screen_buf_t* screen_buf_new(int rows, int cols);
 void screen_buf_free(screen_buf_t *sb);
 
 /**
+ * @brief Resize an existing screen buffer to new dimensions.
+ *
+ * Reallocates the cell array and preserves existing content where
+ * the old and new grids overlap. New cells are filled with spaces
+ * using default colours. If new dimensions equal current dimensions,
+ * the function is a no-op.
+ *
+ * @param sb       Buffer to resize.
+ * @param new_rows New number of rows (must be > 0).
+ * @param new_cols New number of columns (must be > 0).
+ * @return         true on success, false on allocation failure.
+ */
+bool screen_buf_resize(screen_buf_t *sb, int new_rows, int new_cols);
+
+/**
  * @brief Write one character into a cell.
  *
  * The cell's colour and style attributes are NOT modified; only the
@@ -109,9 +128,9 @@ void screen_buf_free(screen_buf_t *sb);
  * @param sb   Target screen buffer.
  * @param row  Row index (0-based).
  * @param col  Column index (0-based).
- * @param ch   Character byte to write.
+ * @param ch   Unicode codepoint to write.
  */
-void screen_buf_put(screen_buf_t *sb, int row, int col, uint8_t ch);
+void screen_buf_put(screen_buf_t *sb, int row, int col, int ch);
 
 /**
  * @brief Return a pointer to the cell at (row, col).

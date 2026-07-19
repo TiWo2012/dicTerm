@@ -50,15 +50,6 @@ static int tests_passed = 0;
     }                                                                     \
   } while (0)
 
-#define ASSERT_STR_EQ(a, b, len, msg)                                     \
-  do {                                                                    \
-    if (memcmp((a), (b), (len)) != 0) {                                   \
-      printf("\n    ASSERT_STR_EQ: %s\n    File: %s:%d\n", msg,            \
-             __FILE__, __LINE__);                                         \
-      return false;                                                       \
-    }                                                                     \
-  } while (0)
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -66,16 +57,16 @@ static int tests_passed = 0;
 #define COLS 100
 #define CAP  10
 
-// Fill `buf` with a predictable pattern for the given line number.
-static void fill_line(char *buf, int line, int cols) {
+// Fill `buf` with a predictable codepoint pattern for the given line number.
+static void fill_line(int *buf, int line, int cols) {
   for (int i = 0; i < cols; i++)
-    buf[i] = (char)(' ' + (line + i) % 95);
+    buf[i] = ' ' + (line + i) % 95;
 }
 
 // Check that line matches the expected pattern for the given line number.
-static int check_line(const char *buf, int line, int cols) {
+static int check_line(const int *buf, int line, int cols) {
   for (int i = 0; i < cols; i++) {
-    if (buf[i] != (char)(' ' + (line + i) % 95))
+    if (buf[i] != ' ' + (line + i) % 95)
       return 0;
   }
   return 1;
@@ -112,7 +103,7 @@ static bool test_push_and_get(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < 5; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
@@ -122,7 +113,7 @@ static bool test_push_and_get(void) {
   ASSERT_INT_EQ(scrollback_total_pushed(sb), 5, "total = 5");
 
   // Get most recent (index 0 should be line 4).
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS), "get index 0");
   ASSERT(check_line(out, 4, COLS), "most recent = line 4");
 
@@ -142,7 +133,7 @@ static bool test_wrap_around(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   int total = CAP + 5;
   for (int i = 0; i < total; i++) {
     fill_line(line, i, COLS);
@@ -154,7 +145,7 @@ static bool test_wrap_around(void) {
   ASSERT_INT_EQ(scrollback_total_pushed(sb), total, "total = CAP+5");
 
   // Most recent (index 0) = line total-1.
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS), "get most recent");
   ASSERT(check_line(out, total - 1, COLS), "most recent = last pushed");
 
@@ -170,7 +161,7 @@ static bool test_clear(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < 5; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
@@ -187,7 +178,7 @@ static bool test_clear(void) {
   ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after re-push");
   ASSERT_INT_EQ(scrollback_total_pushed(sb), 6, "total incremented");
 
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS), "get after re-push");
   ASSERT(check_line(out, 99, COLS), "line 99");
 
@@ -199,7 +190,7 @@ static bool test_reset(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < 5; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
@@ -220,7 +211,7 @@ static bool test_null_safety(void) {
   scrollback_clear(NULL);
   scrollback_reset(NULL);
 
-  char out[COLS];
+  int out[COLS];
   ASSERT(!scrollback_get(NULL, 0, out, COLS), "get(NULL) fails");
   ASSERT(!scrollback_get(NULL, 0, NULL, COLS), "get(NULL, NULL) fails");
   scrollback_destroy(NULL);
@@ -232,7 +223,7 @@ static bool test_exact_capacity(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < CAP; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
@@ -241,7 +232,7 @@ static bool test_exact_capacity(void) {
   ASSERT_INT_EQ(scrollback_count(sb), CAP, "count = CAP");
   ASSERT_INT_EQ(scrollback_total_pushed(sb), CAP, "total = CAP");
 
-  char out[COLS];
+  int out[COLS];
   for (int i = 0; i < CAP; i++) {
     ASSERT(scrollback_get(sb, i, out, COLS), "get index");
     ASSERT(check_line(out, CAP - 1 - i, COLS), "line order check");
@@ -256,13 +247,13 @@ static bool test_partial_out_buffer(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   fill_line(line, 42, COLS);
   scrollback_push(sb, line);
 
-  char small[5];
+  int small[5];
   ASSERT(scrollback_get(sb, 0, small, 5), "get with small buffer");
-  ASSERT_INT_EQ(memcmp(small, line, 5), 0, "first 5 bytes match");
+  ASSERT_INT_EQ(memcmp(small, line, 5 * sizeof(int)), 0, "first 5 codepoints match");
 
   scrollback_destroy(sb);
   return true;
@@ -277,13 +268,13 @@ static bool test_capacity_one(void) {
   scrollback_t *sb = scrollback_create(1, COLS);
   ASSERT(sb != NULL, "create cap=1");
 
-  char line[COLS];
+  int line[COLS];
   fill_line(line, 0, COLS);
   scrollback_push(sb, line);
   ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after 1 push");
   ASSERT_INT_EQ(scrollback_total_pushed(sb), 1, "total = 1");
 
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS), "get index 0");
   ASSERT(check_line(out, 0, COLS), "line 0");
 
@@ -304,13 +295,16 @@ static bool test_cols_one(void) {
   scrollback_t *sb = scrollback_create(5, 1);
   ASSERT(sb != NULL, "create cols=1");
 
-  scrollback_push(sb, "A");
-  scrollback_push(sb, "B");
-  scrollback_push(sb, "C");
+  int line_a[] = {'A'};
+  int line_b[] = {'B'};
+  int line_c[] = {'C'};
+  scrollback_push(sb, line_a);
+  scrollback_push(sb, line_b);
+  scrollback_push(sb, line_c);
 
   ASSERT_INT_EQ(scrollback_count(sb), 3, "count = 3");
 
-  char out[4];
+  int out[4];
   ASSERT(scrollback_get(sb, 0, out, 4), "get index 0");
   ASSERT_INT_EQ(out[0], 'C', "most recent = C");
   ASSERT(scrollback_get(sb, 2, out, 4), "get index 2");
@@ -326,7 +320,7 @@ static bool test_stress_sequential(void) {
   ASSERT(sb != NULL, "create");
 
   int total = CAP * 10;
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < total; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
@@ -336,7 +330,7 @@ static bool test_stress_sequential(void) {
   ASSERT_INT_EQ(scrollback_total_pushed(sb), total, "total = 10*CAP");
 
   // Verify all CAP stored lines: oldest (index CAP-1) to newest (index 0).
-  char out[COLS];
+  int out[COLS];
   for (int i = 0; i < CAP; i++) {
     int expected_line = total - CAP + i;   // oldest retained line + i
     ASSERT(scrollback_get(sb, CAP - 1 - i, out, COLS), "get index");
@@ -352,8 +346,8 @@ static bool test_interleaved_push_get(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
-  char out[COLS];
+  int line[COLS];
+  int out[COLS];
 
   // Push 3 lines: 0, 1, 2
   for (int i = 0; i < 3; i++) {
@@ -393,14 +387,14 @@ static bool test_viewport_indexing(void) {
   scrollback_t *sb = scrollback_create(cap, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   int total = 15;  // push 15 distinct lines (lines 0..14)
   for (int i = 0; i < total; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
   }
 
-  char out[COLS];
+  int out[COLS];
 
   // Scenario 1: scroll_offset = 5 (showing 5 scrollback lines at top).
   //   Row 0 -> sb_idx = 4 -> scrollback_get(4) = line total-1-4 = line 10
@@ -434,14 +428,14 @@ static bool test_offset_clamping(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
+  int line[COLS];
   for (int i = 0; i < 3; i++) {
     fill_line(line, i, COLS);
     scrollback_push(sb, line);
   }
 
   // Only indices 0..2 are valid (count = 3).
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS),  "index 0 valid");
   ASSERT(scrollback_get(sb, 2, out, COLS),  "index 2 valid");
   ASSERT(!scrollback_get(sb, 3, out, COLS), "index 3 out of range");
@@ -465,8 +459,8 @@ static bool test_get_after_clear_and_repush(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
-  char out[COLS];
+  int line[COLS];
+  int out[COLS];
 
   // Push a few lines then clear.
   for (int i = 0; i < 5; i++) {
@@ -496,8 +490,8 @@ static bool test_many_wrap_arounds(void) {
   scrollback_t *sb = scrollback_create(CAP, COLS);
   ASSERT(sb != NULL, "create");
 
-  char line[COLS];
-  char out[COLS];
+  int line[COLS];
+  int out[COLS];
   int total = CAP * 3;
 
   for (int i = 0; i < total; i++) {
@@ -525,7 +519,7 @@ static bool test_push_null_line(void) {
   ASSERT(sb != NULL, "create");
 
   // Normal push first.
-  char line[COLS];
+  int line[COLS];
   fill_line(line, 42, COLS);
   scrollback_push(sb, line);
   ASSERT_INT_EQ(scrollback_count(sb), 1, "count = 1 after normal push");
@@ -535,7 +529,7 @@ static bool test_push_null_line(void) {
   ASSERT_INT_EQ(scrollback_count(sb), 1, "count unchanged after NULL push");
   ASSERT_INT_EQ(scrollback_total_pushed(sb), 1, "total unchanged after NULL push");
 
-  char out[COLS];
+  int out[COLS];
   ASSERT(scrollback_get(sb, 0, out, COLS), "get after NULL push");
   ASSERT(check_line(out, 42, COLS), "content preserved");
 

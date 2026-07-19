@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/timo/Projects/dicTerm/build-rel/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

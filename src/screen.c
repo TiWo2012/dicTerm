@@ -56,12 +56,60 @@ void screen_buf_free(screen_buf_t *sb) {
   free(sb);
 }
 
-/// @brief Write one character into a cell without touching colour attributes.
+/// @brief Resize an existing screen buffer to new dimensions.
+///
+/// Reallocates the cell array and preserves existing content where
+/// the old and new grids overlap. New cells are filled with spaces
+/// using default colours. If new dimensions equal current dimensions,
+/// the function is a no-op.
+///
+/// @param sb       Buffer to resize.
+/// @param new_rows New number of rows (must be > 0).
+/// @param new_cols New number of columns (must be > 0).
+/// @return         true on success, false on allocation failure.
+bool screen_buf_resize(screen_buf_t *sb, int new_rows, int new_cols) {
+  if (!sb || new_rows <= 0 || new_cols <= 0) return false;
+  if (new_rows == sb->rows && new_cols == sb->cols) return true;
+
+  screen_cell_t *new_cells = (screen_cell_t*)calloc((size_t)new_rows * (size_t)new_cols,
+                                                     sizeof(screen_cell_t));
+  if (!new_cells) return false;
+
+  // Copy overlapping region from old buffer
+  int copy_rows = new_rows < sb->rows ? new_rows : sb->rows;
+  int copy_cols = new_cols < sb->cols ? new_cols : sb->cols;
+  for (int r = 0; r < copy_rows; r++) {
+    size_t src_off = (size_t)r * (size_t)sb->cols;
+    size_t dst_off = (size_t)r * (size_t)new_cols;
+    memcpy(&new_cells[dst_off], &sb->cells[src_off],
+           (size_t)copy_cols * sizeof(screen_cell_t));
+  }
+
+  // Initialise new cells (outside copied region) to defaults
+  for (int r = 0; r < new_rows; r++) {
+    for (int c = 0; c < new_cols; c++) {
+      if (r < copy_rows && c < copy_cols) continue; // already copied
+      screen_cell_t *cell = &new_cells[(size_t)r * (size_t)new_cols + (size_t)c];
+      cell->ch = ' ';
+      cell->fg[0] = 220; cell->fg[1] = 220; cell->fg[2] = 220;
+      cell->bg[0] = 0;   cell->bg[1] = 0;   cell->bg[2] = 0;
+      cell->bold = cell->italic = cell->underline = cell->blink = 0;
+    }
+  }
+
+  free(sb->cells);
+  sb->cells = new_cells;
+  sb->rows = new_rows;
+  sb->cols = new_cols;
+  return true;
+}
+
+/// @brief Write a decoded codepoint into a cell without touching colour attributes.
 /// @param sb   Target buffer.
 /// @param row  Row index.
 /// @param col  Column index.
-/// @param ch   Character to write.
-void screen_buf_put(screen_buf_t *sb, int row, int col, uint8_t ch) {
+/// @param ch   Unicode codepoint to write.
+void screen_buf_put(screen_buf_t *sb, int row, int col, int ch) {
   if (!sb || row < 0 || row >= sb->rows || col < 0 || col >= sb->cols)
     return;
   sb->cells[row * sb->cols + col].ch = ch;
@@ -154,6 +202,8 @@ void screen_buf_erase_display(screen_buf_t *sb, int row, int col, int mode,
     for (int r = 0; r < sb->rows; r++)
       screen_buf_clear_row(sb, r, reset_colours);
     break;
+  default:
+    break;
   }
 }
 
@@ -194,6 +244,8 @@ void screen_buf_erase_line(screen_buf_t *sb, int row, int col, int mode,
     break;
   case 2: // entire line
     screen_buf_clear_row(sb, row, reset_colours);
+    break;
+  default:
     break;
   }
 }

@@ -1,13 +1,18 @@
+/**
+ * @file parser.h
+ * @brief ANSI escape sequence parser (ECMA-48 / VT100 / xterm).
+ *
+ * A callback-driven state machine that parses terminal control sequences
+ * from a byte stream.  Supports CSI, OSC, DCS, SOS/PM/APC, ESC sequences,
+ * C0 controls, and printable text.  Zero-allocation design — all state
+ * is stored in the parser_t struct provided by the caller.
+ */
 #ifndef PARSER_H
 #define PARSER_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-// ---------------------------------------------------------------------------
-// Parser state machine for ANSI escape sequences (ECMA-48 / VT100/xterm)
-// ---------------------------------------------------------------------------
 
 #define PARSER_MAX_PARAMS 16
 #define PARSER_MAX_INTERMEDIATES 2

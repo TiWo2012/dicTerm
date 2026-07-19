@@ -1,13 +1,13 @@
+/**
+ * @file scrollback.h
+ * @brief Scrollback ring buffer for terminal line history.
+ *
+ * A fixed-capacity ring buffer that stores lines that have scrolled off the
+ * visible terminal screen.  Supports push (line scrolls out), indexed lookup
+ * (0 = most recent), clear (preserves total pushed counter), and full reset.
+ */
 #ifndef SCROLLBACK_H
 #define SCROLLBACK_H
-
-// ---------------------------------------------------------------------------
-// Scrollback buffer for terminal dicTerm.
-//
-// A fixed-capacity ring buffer that stores lines that have scrolled off the
-// visible terminal screen.  Supports push (line scrolls out), indexed lookup,
-// and reset.
-// ---------------------------------------------------------------------------
 
 #include <stdint.h>
 
@@ -33,10 +33,10 @@ scrollback_t *scrollback_create(int capacity, int cols);
 void scrollback_destroy(scrollback_t *sb);
 
 /**
- * Push a line (cols bytes) into the scrollback buffer.
- * Characters that are < 0x20 (except tab and newline) are turned into spaces.
+ * Push a line (cols codepoints) into the scrollback buffer.
+ * Non-printable codepoints (< 0x20, except tab) are turned into spaces.
  */
-void scrollback_push(scrollback_t *sb, const char *line);
+void scrollback_push(scrollback_t *sb, const int *line);
 
 /**
  * Return the number of lines currently stored in the scrollback.
@@ -56,11 +56,11 @@ int scrollback_total_pushed(const scrollback_t *sb);
  * @param sb       Scrollback handle.
  * @param index   0 = most recently pushed line,
  *                scrollback_count(sb)-1 = oldest retained line.
- * @param out      Buffer of at least `cols` bytes to receive the line.
- * @param out_len  Size of `out`.
+ * @param out      Buffer of at least `cols` codepoints to receive the line.
+ * @param out_len  Size of `out` (in codepoints, not bytes).
  * @return         1 on success, 0 if index is out of range.
  */
-int scrollback_get(const scrollback_t *sb, int index, char *out, int out_len);
+int scrollback_get(const scrollback_t *sb, int index, int *out, int out_len);
 
 /**
  * Clear all stored lines.  Total-pushed counter is NOT reset
