@@ -65,12 +65,23 @@ target_include_directories(test_ansi_colors
         ${CMAKE_SOURCE_DIR}/include
 )
 
+# Mouse reporting tests (no raylib dependency – pure encoder).
+add_executable(test_mouse
+    src/mouse.c
+    src/test_mouse.c
+)
+target_include_directories(test_mouse
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+)
+
 # Register with CTest.
 enable_testing()
 add_test(NAME test_parser COMMAND test_parser)
 add_test(NAME test_scrollback COMMAND test_scrollback)
 add_test(NAME test_screen COMMAND test_screen)
 add_test(NAME test_ansi_colors COMMAND test_ansi_colors)
+add_test(NAME test_mouse COMMAND test_mouse)
 
 # Auto-run tests in Debug builds.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -94,5 +105,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         COMMENT "Running ANSI colour tests..."
         USES_TERMINAL
     )
-    add_dependencies(${PROJECT_NAME} test_parser test_scrollback test_screen test_ansi_colors)
+    add_custom_command(TARGET test_mouse POST_BUILD
+        COMMAND $<TARGET_FILE:test_mouse>
+        COMMENT "Running mouse unit tests..."
+        USES_TERMINAL
+    )
+    add_dependencies(${PROJECT_NAME} test_parser test_scrollback test_screen test_ansi_colors test_mouse)
 endif()

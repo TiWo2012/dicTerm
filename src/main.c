@@ -14,6 +14,7 @@
 #include "parser.h"
 #include "font.h"
 #include "input.h"
+#include "mouse.h"
 #include "scrollback.h"
 #include "screen.h"
 
@@ -50,6 +51,11 @@ typedef struct {
   font_handle_t *font;
   int           win_width;
   int           win_height;
+
+  // Mouse reporting
+  mouse_state_t mouse;
+  int           mouse_last_col;  // last reported cell (motion de-duplication)
+  int           mouse_last_row;
 } terminal_t;
 
 // ---------------------------------------------------------------------------
@@ -412,8 +418,9 @@ static void set_bright_bg(terminal_t *t, int idx) {
 static void on_csi(int params[16], int num_params,
                    char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
-  (void)intermediates; (void)num_intermediates;
   terminal_t *t = (terminal_t *)ctx;
+
+  bool dec_private = (num_intermediates > 0 && intermediates[0] == '?');
 
 #define PARAM(n) ((n) < num_params && params[(n)] >= 0 ? params[(n)] : -1)
 
@@ -558,6 +565,18 @@ static void on_csi(int params[16], int num_params,
     break;
   }
 
+  // ---- DEC private mode set / reset (mouse tracking etc.) ----
+  case 'h': // DECSET
+  case 'l': // DECRST
+    if (dec_private) {
+      bool enable = (final == 'h');
+      for (int i = 0; i < num_params; i++) {
+        if (params[i] >= 0)
+          mouse_set_mode(&t->mouse, params[i], enable);
+      }
+    }
+    break;
+
   // ---- Scroll ----
   case 'S': { // SU – scroll up
     int n = PARAM(0); if (n < 0) n = 1;
@@ -688,6 +707,125 @@ static void pty_resize(int master_fd, int cols, int rows) {
     .ws_ypixel = 0,
   };
   ioctl(master_fd, TIOCSWINSZ, &ws);
+}
+
+// ---------------------------------------------------------------------------
+// Mouse input
+// ---------------------------------------------------------------------------
+
+/// @brief Write all bytes to @p fd, retrying on partial / EAGAIN writes.
+/// @return Bytes written, or -1 on a real error.
+static int write_all_fd(int fd, const uint8_t *buf, int len) {
+  int total = 0;
+  while (total < len) {
+    ssize_t r = write(fd, buf + total, (size_t)(len - total));
+    if (r > 0) {
+      total += (int)r;
+    } else if (r == 0) {
+      return -1;
+    } else {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        continue;
+      return -1;
+    }
+  }
+  return total;
+}
+
+/// @brief Map a raylib mouse button to the terminal button identifier.
+static mouse_button_t rl_button(int rl) {
+  switch (rl) {
+  case MOUSE_BUTTON_LEFT:   return MOUSE_BTN_LEFT;
+  case MOUSE_BUTTON_MIDDLE: return MOUSE_BTN_MIDDLE;
+  case MOUSE_BUTTON_RIGHT:  return MOUSE_BTN_RIGHT;
+  default:                  return MOUSE_BTN_NONE;
+  }
+}
+
+/// @brief Poll raylib pointer state and report events to the child.
+///
+/// When the application has enabled mouse tracking (via DECSET 9/1000/
+/// 1002/1003), button, motion and wheel events are encoded and written to
+/// the PTY.  When tracking is off, the wheel instead scrolls the local
+/// scrollback viewport.
+///
+/// @param t       Terminal state.
+/// @param fd      Master PTY file descriptor.
+/// @param char_w  Cell width in pixels.
+/// @param char_h  Cell height in pixels.
+static void handle_mouse(terminal_t *t, int fd, float char_w, float char_h) {
+  float wheel = GetMouseWheelMove();
+
+  // ── Tracking off: mouse wheel drives the local scrollback viewport ──
+  if (t->mouse.track == MOUSE_TRACK_OFF) {
+    if (wheel != 0.0f) {
+      int max_offset = scrollback_count(t->scrollback);
+      t->scroll_offset += (int)(wheel * MOUSE_WHEEL_LINES);
+      if (t->scroll_offset < 0) t->scroll_offset = 0;
+      if (t->scroll_offset > max_offset) t->scroll_offset = max_offset;
+    }
+    return;
+  }
+
+  // ── Tracking on: translate pointer events into reports ──
+  Vector2 m = GetMousePosition();
+  int col = (int)((m.x - WIN_PADDING) / char_w);
+  int row = (int)((m.y - WIN_PADDING) / char_h);
+  if (col < 0) col = 0;
+  if (row < 0) row = 0;
+  if (col >= t->screen.cols) col = t->screen.cols - 1;
+  if (row >= t->screen.rows) row = t->screen.rows - 1;
+
+  bool shift = IsKeyDown(KEY_LEFT_SHIFT)   || IsKeyDown(KEY_RIGHT_SHIFT);
+  bool alt   = IsKeyDown(KEY_LEFT_ALT)     || IsKeyDown(KEY_RIGHT_ALT);
+  bool ctrl  = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+
+  uint8_t seq[MOUSE_MAX_SEQ];
+  int len;
+
+  // Wheel notches (may be more than one per frame).
+  int notches = (int)(wheel < 0 ? -wheel : wheel);
+  if (notches > 0) {
+    mouse_event_kind_t k = (wheel > 0) ? MOUSE_EVENT_WHEEL_UP
+                                       : MOUSE_EVENT_WHEEL_DOWN;
+    for (int n = 0; n < notches; n++) {
+      len = mouse_encode(&t->mouse, k, MOUSE_BTN_NONE, col, row,
+                         shift, alt, ctrl, seq);
+      if (len > 0) write_all_fd(fd, seq, len);
+    }
+  }
+
+  // Button presses / releases.
+  static const int rl_buttons[] = {
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT
+  };
+  for (size_t b = 0; b < sizeof(rl_buttons) / sizeof(rl_buttons[0]); b++) {
+    int rl = rl_buttons[b];
+    if (IsMouseButtonPressed(rl)) {
+      len = mouse_encode(&t->mouse, MOUSE_EVENT_PRESS, rl_button(rl),
+                         col, row, shift, alt, ctrl, seq);
+      if (len > 0) write_all_fd(fd, seq, len);
+    }
+    if (IsMouseButtonReleased(rl)) {
+      len = mouse_encode(&t->mouse, MOUSE_EVENT_RELEASE, rl_button(rl),
+                         col, row, shift, alt, ctrl, seq);
+      if (len > 0) write_all_fd(fd, seq, len);
+    }
+  }
+
+  // Motion (only when the cell changes, to avoid a flood of reports).
+  mouse_button_t held = MOUSE_BTN_NONE;
+  if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))        held = MOUSE_BTN_LEFT;
+  else if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) held = MOUSE_BTN_MIDDLE;
+  else if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))  held = MOUSE_BTN_RIGHT;
+
+  if (col != t->mouse_last_col || row != t->mouse_last_row) {
+    len = mouse_encode(&t->mouse, MOUSE_EVENT_MOTION, held, col, row,
+                       shift, alt, ctrl, seq);
+    if (len > 0) write_all_fd(fd, seq, len);
+    t->mouse_last_col = col;
+    t->mouse_last_row = row;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +1009,9 @@ int main(void) {
     // exit scrollback mode (return to normal terminal view).
     if (written > 0 && term.scroll_offset > 0)
       term.scroll_offset = 0;
+
+    // Mouse input → PTY (or local scrollback when tracking is disabled)
+    handle_mouse(&term, master_fd, char_w, char_h);
 
     // Window resize → PTY
     int new_w = GetScreenWidth();

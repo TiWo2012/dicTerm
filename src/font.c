@@ -502,9 +502,18 @@ float font_measure_text(font_handle_t *handle, const char *text, int len) {
     if (count == 0) return 0;
 
     Font *f = handle->current;
-    Vector2 sz = MeasureTextCodepoints(*f, codepoints, count,
-                                       handle->font_size, handle->spacing);
-    return sz.x;
+    float scale = (f->baseSize > 0) ? handle->font_size / (float)f->baseSize : 1.0f;
+    float total = 0.0f;
+    for (int k = 0; k < count; k++) {
+        int idx = GetGlyphIndex(*f, codepoints[k]);
+        if (f->glyphs[idx].advanceX != 0)
+            total += (float)f->glyphs[idx].advanceX * scale;
+        else
+            total += (f->recs[idx].width + (float)f->glyphs[idx].offsetX) * scale;
+        if (k < count - 1)
+            total += handle->spacing;
+    }
+    return total;
 }
 
 float font_char_width(const font_handle_t *handle) {
