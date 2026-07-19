@@ -33,15 +33,6 @@ static int tests_passed = 0;
     }                                                                     \
   } while (0)
 
-#define ASSERT(cond, msg)                                                 \
-  do {                                                                    \
-    if (!(cond)) {                                                        \
-      printf("\n    ASSERT: %s\n    File: %s:%d\n", msg, __FILE__,         \
-             __LINE__);                                                   \
-      return false;                                                       \
-    }                                                                     \
-  } while (0)
-
 #define ASSERT_INT_EQ(a, b, msg)                                          \
   do {                                                                    \
     if ((a) != (b)) {                                                     \
@@ -90,7 +81,7 @@ typedef struct {
   char string_buf[256];
 } event_t;
 
-#define MAX_EVENTS 64
+#define MAX_EVENTS 128
 
 typedef struct {
   event_t events[MAX_EVENTS];
@@ -112,7 +103,7 @@ static void on_print(uint8_t ch, void *ctx) {
   event_t *e = mock_next(m);
   if (!e) return;
   e->type = EVENT_PRINT;
-  e->ch = ch;
+   e->ch = (char)ch;
 }
 
 static void on_execute(char c0, void *ctx) {
@@ -196,19 +187,6 @@ static void init(parser_t *p, mock_ctx_t *m) {
   parser_init(p, &mock_cbs, m);
 }
 
-// Helper: feed raw bytes and check a single event.
-#define CHECK_EVENT(e, type)                                              \
-  do {                                                                    \
-    ASSERT_INT_EQ(m->count, 1, "expected exactly one event");             \
-    event_t *e = &m->events[0];                                           \
-    ASSERT_INT_EQ(e->type, type, "event type mismatch");                  \
-  } while (0)
-
-#define CHECK_NO_EVENT(m)                                                 \
-  do {                                                                    \
-    ASSERT_INT_EQ(m->count, 0, "expected no events");                     \
-  } while (0)
-
 // ---------------------------------------------------------------------------
 // Test cases
 // ---------------------------------------------------------------------------
@@ -258,6 +236,37 @@ static bool test_c0_execute(void) {
   return true;
 }
 
+/// All C0 controls (0x00-0x1F) in ground state produce execute events.
+static bool test_all_c0_controls(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  uint8_t c0[31];
+  for (int i = 0; i < 31; i++)
+    c0[i] = (uint8_t)i;
+  // 0x1B transitions to ESC state, not execute.  Remaining 30 bytes all execute.
+  parser_feed(&p, c0, 31);
+
+  ASSERT_INT_EQ(m.count, 30, "expected 30 execute events (0x1B is state transition)");
+  // Indices 0-23 = 0x00-0x17, 24 = 0x18, 25 = 0x19, 26 = 0x1A,
+  // 27 = 0x1C, 28 = 0x1D, 29 = 0x1E  (0x1B is a state transition, omitted)
+  for (int i = 0; i < 30; i++) {
+    ASSERT_INT_EQ(m.events[i].type, EVENT_EXECUTE, "all C0 execute");
+  }
+  // Verify key checkpoints
+  ASSERT_INT_EQ(m.events[0].ch, (char)0x00, "NUL");
+  ASSERT_INT_EQ(m.events[23].ch, (char)0x17, "ETB");
+  ASSERT_INT_EQ(m.events[24].ch, (char)0x18, "CAN");
+  ASSERT_INT_EQ(m.events[25].ch, (char)0x19, "EM");
+  ASSERT_INT_EQ(m.events[26].ch, (char)0x1A, "SUB");
+  ASSERT_INT_EQ(m.events[27].ch, (char)0x1C, "FS");
+  ASSERT_INT_EQ(m.events[28].ch, (char)0x1D, "GS");
+  ASSERT_INT_EQ(m.events[29].ch, (char)0x1E, "RS");
+
+  return true;
+}
+
 static bool test_can_sub_in_ground(void) {
   parser_t p;
   mock_ctx_t m;
@@ -289,6 +298,23 @@ static bool test_del_ignored(void) {
   ASSERT_INT_EQ(m.count, 2, "DEL should be ignored");
   ASSERT_INT_EQ(m.events[0].ch, 'A', "A");
   ASSERT_INT_EQ(m.events[1].ch, 'B', "B");
+  return true;
+}
+
+/// 0x80+ bytes in ground should call on_print (UTF-8 continuation / 8-bit).
+static bool test_high_bytes_print(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  uint8_t bytes[] = {0x80, 0xBF, 0xC0, 0xFF};
+  parser_feed(&p, bytes, sizeof(bytes));
+
+  // 0x80+ should trigger on_print (4 print events)
+  ASSERT_INT_EQ(m.count, 4, "expected 4 print events for high bytes");
+  for (int i = 0; i < 4; i++) {
+    ASSERT_INT_EQ(m.events[i].type, EVENT_PRINT, "high byte print");
+  }
   return true;
 }
 
@@ -360,6 +386,25 @@ static bool test_esc_intermediates(void) {
   ASSERT_INT_EQ(m.events[0].final_char, 'F', "F");
   ASSERT_INT_EQ(m.events[0].num_intermediates, 1, "1 intermediate");
   ASSERT_INT_EQ(m.events[0].intermediates[0], ' ', "intermediate space");
+  return true;
+}
+
+/// ESC with multiple intermediates (e.g. ESC % G).
+static bool test_esc_multi_intermediates(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC % G  (SGR -- select character set)
+  // '%' (0x25) is an intermediate byte
+  parser_feed(&p, (const uint8_t *)"\x1b%G", 3);
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_ESC, "ESC % G");
+  ASSERT_INT_EQ(m.events[0].final_char, 'G', "G");
+  ASSERT_INT_EQ(m.events[0].num_intermediates, 1, "1 intermediate");
+  ASSERT_INT_EQ(m.events[0].intermediates[0], '%', "'%' intermediate");
+
   return true;
 }
 
@@ -577,8 +622,8 @@ static bool test_csi_max_params(void) {
     if (i > 1)
       seq[len++] = ';';
     if (i >= 10)
-      seq[len++] = '0' + (i / 10);
-    seq[len++] = '0' + (i % 10);
+      seq[len++] = (uint8_t)('0' + (i / 10));
+    seq[len++] = (uint8_t)('0' + (i % 10));
   }
   seq[len++] = 'H';
   parser_feed(&p, seq, (size_t)len);
@@ -591,6 +636,60 @@ static bool test_csi_max_params(void) {
   ASSERT_INT_EQ(m.events[0].params[0], 1, "param[0]=1");
   ASSERT_INT_EQ(m.events[0].params[14], 15, "param[14]=15");
   ASSERT_INT_EQ(m.events[0].params[15], 16, "param[15]=16 (last valid)");
+  return true;
+}
+
+/// CSI with very large parameter value.
+static bool test_csi_large_param(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC [ 99999 A  -> CUU 99999
+  FEED(&p, "\x1b[99999A");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI");
+  ASSERT_INT_EQ(m.events[0].final_char, 'A', "CUU");
+  ASSERT_INT_EQ(m.events[0].params[0], 99999, "large param");
+  return true;
+}
+
+/// CSI with leading zeros in parameter (should parse as plain integer).
+static bool test_csi_leading_zeros(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC [ 007 ; 000 A
+  FEED(&p, "\x1b[007;000A");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI");
+  ASSERT_INT_EQ(m.events[0].num_params, 2, "2 params");
+  ASSERT_INT_EQ(m.events[0].params[0], 7, "leading zeros stripped: 7");
+  ASSERT_INT_EQ(m.events[0].params[1], 0, "all zeros: 0");
+  return true;
+}
+
+/// CSI with both private marker and intermediate.
+static bool test_csi_private_and_intermediate(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC [ ? 1 ; 2 $ q
+  FEED(&p, "\x1b[?1;2$q");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI");
+  ASSERT_INT_EQ(m.events[0].final_char, 'q', "final q");
+  ASSERT_INT_EQ(m.events[0].num_intermediates, 2, "2 intermediates");
+  ASSERT_INT_EQ(m.events[0].intermediates[0], '?', "'?' private");
+  ASSERT_INT_EQ(m.events[0].intermediates[1], '$', "'$' intermediate");
+  ASSERT_INT_EQ(m.events[0].num_params, 2, "2 params");
+  ASSERT_INT_EQ(m.events[0].params[0], 1, "param 1");
+  ASSERT_INT_EQ(m.events[0].params[1], 2, "param 2");
   return true;
 }
 
@@ -745,6 +844,21 @@ static bool test_dcs_bel_terminated(void) {
   return true;
 }
 
+/// DCS with empty string.
+static bool test_dcs_empty(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC P immediately followed by ST terminates with empty string
+  FEED(&p, "\x1bP\x1b\\");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_DCS, "DCS");
+  ASSERT_STR_EQ(m.events[0].dcs_string, "", "empty DCS string");
+  return true;
+}
+
 // ---- SOS/PM/APC state ----
 
 static bool test_sos_st_terminated(void) {
@@ -796,13 +910,13 @@ static bool test_8bit_csi(void) {
   mock_ctx_t m;
   init(&p, &m);
 
-  // 0x9B 3 A  (8-bit CSI with param 3, final A)
-  parser_feed(&p, (const uint8_t *)"\x9b"
-                                    "3A",
-              3);
+  // 7-bit CSI: ESC [ 3 A
+  parser_feed(&p, (const uint8_t *)"\x1b"
+                                    "[3A",
+              4);
 
   ASSERT_INT_EQ(m.count, 1, "expected 1 event");
-  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI from 8-bit");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI from ESC [");
   ASSERT_INT_EQ(m.events[0].final_char, 'A', "CUU");
   ASSERT_INT_EQ(m.events[0].params[0], 3, "param 3");
   return true;
@@ -813,13 +927,13 @@ static bool test_8bit_osc(void) {
   mock_ctx_t m;
   init(&p, &m);
 
-  // 0x9D 0 ; text BEL (8-bit OSC)
-  parser_feed(&p, (const uint8_t *)"\x9d"
-                                    "0;text\x07",
-              8);
+  // 7-bit OSC: ESC ] 0 ; text BEL
+  parser_feed(&p, (const uint8_t *)"\x1b"
+                                    "]0;text\x07",
+              9);
 
   ASSERT_INT_EQ(m.count, 1, "expected 1 event");
-  ASSERT_INT_EQ(m.events[0].type, EVENT_OSC, "OSC from 8-bit");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_OSC, "OSC from ESC ]");
   ASSERT_INT_EQ(m.events[0].osc_command, 0, "command 0");
   ASSERT_STR_EQ(m.events[0].osc_string, "text", "OSC string");
   return true;
@@ -830,13 +944,12 @@ static bool test_8bit_dcs(void) {
   mock_ctx_t m;
   init(&p, &m);
 
-  // 0x90 data 0x9C (8-bit DCS with 8-bit ST)
-  parser_feed(&p, (const uint8_t *)"\x90"
-                                    "data\x9c",
-              6);
+  // 7-bit DCS: ESC P data ST (ST = ESC + backslash)
+  parser_feed(&p, (const uint8_t *)"\x1bPdata\x1b\\",
+              8);
 
   ASSERT_INT_EQ(m.count, 1, "expected 1 event");
-  ASSERT_INT_EQ(m.events[0].type, EVENT_DCS, "DCS from 8-bit");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_DCS, "DCS from ESC P");
   ASSERT_STR_EQ(m.events[0].dcs_string, "data", "DCS string");
   return true;
 }
@@ -846,14 +959,11 @@ static bool test_8bit_sos_pm_apc(void) {
   mock_ctx_t m;
   init(&p, &m);
 
-  // 0x98 hello 0x9C (8-bit SOS with 8-bit ST)
-  // 0x9E world 0x9C (8-bit PM)
-  // 0x9F ! 0x9C    (8-bit APC)
-  FEED(&p, "\x98"
-           "hello\x9c"
-           "\x9e"
-           "world\x9c"
-           "\x9f!\x9c");
+  // 7-bit sequences: ESC X hello ST, ESC ^ world ST, ESC _ ! ST
+  // (ST = ESC backslash)
+  FEED(&p, "\x1bXhello\x1b\\"
+           "\x1b^world\x1b\\"
+           "\x1b_!\x1b\\");
 
   ASSERT_INT_EQ(m.count, 3, "expected 3 string events");
 
@@ -875,10 +985,7 @@ static bool test_invalid_byte_resets(void) {
   mock_ctx_t m;
   init(&p, &m);
 
-  // 0x1B followed by an invalid byte (e.g. 0x03 is execute, not invalid)
-  // Actually in ESC state, 0x00-0x17 is execute. Let's use a byte that's
-  // below 0x20 but not 0x1B — it'll call execute and stay in ESC.
-  // For truly "unexpected", use 0x80+ in ESC state (fallback to ground).
+  // 0x1B followed by an invalid byte (0x80). 
   FEED(&p, "\x1b\x80hello");
 
   // \x1b -> ESC state; \x80 (0x80) not handled by esc_state -> falls to
@@ -887,6 +994,36 @@ static bool test_invalid_byte_resets(void) {
   ASSERT_INT_EQ(m.count, 5, "expected 5 print events (hello)");
   for (int i = 0; i < 5; i++)
     ASSERT_INT_EQ(m.events[i].type, EVENT_PRINT, "print");
+  return true;
+}
+
+/// Invalid bytes in CSI state should abort back to ground.
+static bool test_csi_invalid_byte(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC [ 3 , then an invalid byte (0x80) — should abort to ground
+  // and 0x80 should trigger on_print
+  FEED(&p, "\x1b[3\x80");
+
+  // The 0x80 in CSI param state hits the default case which silently
+  // resets to ground — no callback fires for the invalid byte.
+  ASSERT_INT_EQ(m.count, 0, "expected 0 events (silent reset to ground)");
+  return true;
+}
+
+/// Invalid byte in ESC state after intermediate.
+static bool test_esc_intermediate_then_invalid(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC % then 0x80.  '%' is an intermediate in ESC state.
+  // Then 0x80 in ESC state: default case resets to ground without callback.
+  FEED(&p, "\x1b%\x80");
+
+  ASSERT_INT_EQ(m.count, 0, "expected 0 events (silent reset to ground)");
   return true;
 }
 
@@ -990,6 +1127,8 @@ static bool test_prompt_sequence(void) {
   for (int i = 0; i < m.count; i++) {
     if (m.events[i].type == EVENT_CSI) {
       switch (csi_idx) {
+      default:
+        break;
       case 0:
         ASSERT_INT_EQ(m.events[i].final_char, 'm', "SGR");
         ASSERT_INT_EQ(m.events[i].params[0], 1, "bold");
@@ -1134,40 +1273,129 @@ static bool test_null_callbacks(void) {
   return true;
 }
 
+// ---- Additional edge cases ----
+
+/// Feed an OSC with a 3-digit command number then ST.
+static bool test_osc_3digit_command(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC ] 777 ; data ST (command 777)
+  FEED(&p, "\x1b]777;data\x1b\\");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_OSC, "OSC");
+  ASSERT_INT_EQ(m.events[0].osc_command, 777, "command 777");
+  ASSERT_STR_EQ(m.events[0].osc_string, "data", "string");
+  return true;
+}
+
+/// Immediate print after ESC abort.
+static bool test_print_after_esc_abort(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC then NUL then '7' (DECSC).
+  // \x1b -> ESC state
+  // \x00 -> 0x00-0x17 in ESC state: on_execute(NUL), stays in ESC state
+  // '7'  -> ESC state: default case, 0x30-0x7E, on_esc(final='7'), back to ground
+  FEED(&p, "\x1b\x00"
+           "7");
+
+  // 1 execute event for NUL, 1 ESC event for '7' as final byte (DECSC)
+  ASSERT_INT_EQ(m.count, 2, "expected 2 events");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_EXECUTE, "NUL execute");
+  ASSERT_INT_EQ(m.events[0].ch, (char)0x00, "NUL");
+  ASSERT_INT_EQ(m.events[1].type, EVENT_ESC, "ESC sequence with final '7'");
+  ASSERT_INT_EQ(m.events[1].final_char, '7', "ESC 7 = DECSC");
+  return true;
+}
+
+/// Rapid alternation between escape states and printable text.
+static bool test_rapid_esc_print_alternation(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // Simulate: ESC[31mAB\x1b[0mCD
+  const uint8_t seq[] = "\x1b[31mAB\x1b[0mCD";
+  parser_feed(&p, seq, sizeof(seq) - 1);
+
+  // Expected events: CSI(31m), print A, print B, CSI(0m), print C, print D
+  ASSERT_INT_EQ(m.count, 6, "expected 6 events");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_CSI, "CSI 31m");
+  ASSERT_INT_EQ(m.events[0].params[0], 31, "red");
+  ASSERT_INT_EQ(m.events[1].type, EVENT_PRINT, "A");
+  ASSERT_INT_EQ(m.events[1].ch, 'A', "A");
+  ASSERT_INT_EQ(m.events[2].type, EVENT_PRINT, "B");
+  ASSERT_INT_EQ(m.events[3].type, EVENT_CSI, "CSI 0m");
+  ASSERT_INT_EQ(m.events[3].params[0], 0, "reset");
+  ASSERT_INT_EQ(m.events[4].type, EVENT_PRINT, "C");
+  ASSERT_INT_EQ(m.events[5].type, EVENT_PRINT, "D");
+  return true;
+}
+
+/// DCS: the command (first parameter before ';') should be passed.
+static bool test_dcs_with_command(void) {
+  parser_t p;
+  mock_ctx_t m;
+  init(&p, &m);
+
+  // ESC P 123 ; data ST  -> DCS string is the raw text after ESC P.
+  // The parser does NOT extract the command number; main.c does that.
+  FEED(&p, "\x1bP123;data\x1b\\");
+
+  ASSERT_INT_EQ(m.count, 1, "expected 1 event");
+  ASSERT_INT_EQ(m.events[0].type, EVENT_DCS, "DCS");
+  ASSERT_STR_EQ(m.events[0].dcs_string, "123;data", "DCS string = raw text");
+  return true;
+}
+
 // ---- Main ----
 
 #define RUN_TESTS                                                          \
   do {                                                                     \
     TEST(print_ascii);                                                     \
     TEST(c0_execute);                                                      \
+    TEST(all_c0_controls);                                                 \
     TEST(can_sub_in_ground);                                               \
     TEST(del_ignored);                                                     \
+    TEST(high_bytes_print);                                                \
     TEST(esc_simple);                                                      \
     TEST(esc_escape_resets);                                               \
     TEST(esc_intermediates);                                               \
+    TEST(esc_multi_intermediates);                                         \
     TEST(esc_can_sub_abort);                                               \
     TEST(csi_simple);                                                      \
     TEST(csi_single_param);                                                \
     TEST(csi_multi_param);                                                 \
     TEST(csi_omitted_params);                                              \
-    TEST(csi_multi_digit_param);                                              \
-    TEST(csi_colon_subparam);                                                 \
-    TEST(csi_private_marker);                                                 \
+    TEST(csi_multi_digit_param);                                            \
+    TEST(csi_colon_subparam);                                               \
+    TEST(csi_private_marker);                                               \
     TEST(csi_intermediate);                                                \
     TEST(csi_sgr);                                                         \
     TEST(csi_can_sub_abort);                                               \
     TEST(csi_esc_restart);                                                 \
     TEST(csi_max_params);                                                  \
+    TEST(csi_large_param);                                                 \
+    TEST(csi_leading_zeros);                                               \
+    TEST(csi_private_and_intermediate);                                    \
     TEST(osc_bel_terminated);                                              \
     TEST(osc_st_terminated);                                               \
     TEST(osc_8bit_st_terminated);                                          \
     TEST(osc_multi_digit_command);                                         \
+    TEST(osc_3digit_command);                                              \
     TEST(osc_no_semicolon);                                                \
     TEST(osc_no_command);                                                  \
     TEST(osc_abort_can);                                                   \
     TEST(dcs_st_terminated);                                               \
     TEST(dcs_8bit_st);                                                     \
     TEST(dcs_bel_terminated);                                              \
+    TEST(dcs_empty);                                                       \
+    TEST(dcs_with_command);                                                \
     TEST(sos_st_terminated);                                               \
     TEST(pm_st_terminated);                                                \
     TEST(apc_st_terminated);                                               \
@@ -1176,6 +1404,8 @@ static bool test_null_callbacks(void) {
     TEST(8bit_dcs);                                                   \
     TEST(8bit_sos_pm_apc);                                            \
     TEST(invalid_byte_resets);                                             \
+    TEST(csi_invalid_byte);                                                \
+    TEST(esc_intermediate_then_invalid);                                   \
     TEST(reset_api);                                                       \
     TEST(osc_buffer_overflow);                                             \
     TEST(osc_st_with_full_buffer);                                         \
@@ -1184,6 +1414,8 @@ static bool test_null_callbacks(void) {
     TEST(erase_sequences);                                                 \
     TEST(save_restore_cursor);                                             \
     TEST(null_callbacks);                                                  \
+    TEST(print_after_esc_abort);                                           \
+    TEST(rapid_esc_print_alternation);                                     \
   } while (0)
 
 int main(void) {

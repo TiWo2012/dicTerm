@@ -2,7 +2,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
-#include <raylib.h>
+#include <GLFW/glfw3.h>
+#include <GL/glcorearb.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,18 +12,19 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
+#include "config.h"
 #include "parser.h"
 #include "font.h"
 #include "input.h"
 #include "mouse.h"
 #include "scrollback.h"
 #include "screen.h"
+#include "gl_renderer.h"
 
-#define ROWS 36
-#define COLS 100
-#define WIN_PADDING 10
-#define WIN_WIDTH  1280
-#define WIN_HEIGHT 800
+// Terminal geometry – computed from window size and font metrics at startup.
+static int WIN_PADDING = 10;
+static int WIN_WIDTH  = 1280;
+static int WIN_HEIGHT = 800;
 
 /**
  * @file main.c
@@ -34,6 +36,7 @@
  * cell with its individual colours using raylib's font subsystem.
  */
 
+/** @brief Top-level terminal emulator state. */
 typedef struct {
   screen_buf_t  screen;         // visible grid with SGR attributes
   int           cx, cy;         // cursor position (0-based)
@@ -56,13 +59,113 @@ typedef struct {
   mouse_state_t mouse;
   int           mouse_last_col;  // last reported cell (motion de-duplication)
   int           mouse_last_row;
+  screen_buf_t  screen;            /**< Visible screen grid with SGR attributes. */
+  int           cx;                /**< Cursor column (0-based). */
+  int           cy;                /**< Cursor row (0-based). */
+  int           saved_cx;          /**< Saved cursor column (DECSC/DECRC). */
+  int           saved_cy;          /**< Saved cursor row (DECSC/DECRC). */
+
+  uint8_t       cur_fg[3];         /**< Current SGR foreground colour (RGB). */
+  uint8_t       cur_bg[3];         /**< Current SGR background colour (RGB). */
+  bool          cur_bold;          /**< Current bold attribute state. */
+  bool          cur_underline;     /**< Current underline attribute state. */
+
+  parser_t      parser;            /**< ANSI escape sequence parser instance. */
+  scrollback_t *scrollback;        /**< Scrollback ring buffer for off-screen lines. */
+  int           scroll_offset;     /**< Scrollback viewport offset (0 = normal, > 0 = scrolled back). */
+  font_handle_t *font;             /**< Font rendering handle. */
+  int           win_width;         /**< Current window width in pixels. */
+  int           win_height;        /**< Current window height in pixels. */
+
+  int           utf8_codepoint;    /**< Partially accumulated UTF-8 codepoint. */
+  int           utf8_remaining;    /**< UTF-8 continuation bytes still expected. */
 } terminal_t;
+
+// ---------------------------------------------------------------------------
+// UTF-8 decoder – stateful byte-at-a-time decoder.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Decode one byte of a UTF-8 sequence.
+ *
+ * Call for each byte in sequence.  Return values:
+ *   - -2: continuation byte accepted, codepoint still incomplete
+ *   - -1: invalid byte sequence (decoder reset)
+ *   -  0: start byte accepted, need more continuation bytes
+ *   - >0: complete codepoint decoded (returned value)
+ *
+ * @param t  Terminal state (holds decoder state in utf8_* fields).
+ * @param b  The byte to decode.
+ * @return   See detailed description above.
+ */
+
+static int utf8_decode_byte(terminal_t *t, uint8_t b) {
+  if (b < 0x80) {
+    // Single-byte ASCII – reset state and return immediately.
+    t->utf8_remaining = 0;
+    t->utf8_codepoint = 0;
+    return b;
+  }
+
+  if (t->utf8_remaining > 0) {
+    // Continuation byte (10xxxxxx)
+    if ((b & 0xC0) != 0x80) {
+      // Invalid continuation byte – reset.
+      t->utf8_remaining = 0;
+      t->utf8_codepoint = 0;
+      return -1;
+    }
+    t->utf8_codepoint = (t->utf8_codepoint << 6) | (b & 0x3F);
+    t->utf8_remaining--;
+    if (t->utf8_remaining == 0) {
+      int cp = t->utf8_codepoint;
+      t->utf8_codepoint = 0;
+      return cp;
+    }
+    return -2; // continuation byte accepted, more needed
+  }
+
+  // Start byte of a multi-byte sequence
+  t->utf8_codepoint = 0;
+  t->utf8_remaining = 0;
+
+  if ((b & 0xE0) == 0xC0) {
+    // 2-byte sequence: 110xxxxx 10xxxxxx
+    t->utf8_codepoint = b & 0x1F;
+    t->utf8_remaining = 1;
+  } else if ((b & 0xF0) == 0xE0) {
+    // 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx
+    t->utf8_codepoint = b & 0x0F;
+    t->utf8_remaining = 2;
+  } else if ((b & 0xF8) == 0xF0) {
+    // 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+    t->utf8_codepoint = b & 0x07;
+    t->utf8_remaining = 3;
+  } else {
+    // Invalid start byte
+    return -1;
+  }
+  return 0; // need more bytes
+}
+
+/**
+ * @brief Reset the UTF-8 decoder state.
+ *
+ * Must be called after any escape sequence, C0 control, or other
+ * non-printable event to discard any partially accumulated codepoint.
+ *
+ * @param t  Terminal state.
+ */
+static void utf8_reset(terminal_t *t) {
+  t->utf8_remaining = 0;
+  t->utf8_codepoint = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Colour tables for ANSI SGR codes
 // ---------------------------------------------------------------------------
 
-// Standard ANSI colours (codes 30-37 and 40-47)
+/** @brief Standard ANSI colours for SGR codes 30-37 (fg) and 40-47 (bg). */
 static const uint8_t ansi_std[8][3] = {
   {  0,   0,   0},  // 0 black
   {205,  49,  49},  // 1 red
@@ -74,7 +177,7 @@ static const uint8_t ansi_std[8][3] = {
   {229, 229, 229},  // 7 white
 };
 
-// Bright ANSI colours (codes 90-97 and 100-107)
+/** @brief Bright ANSI colours for SGR codes 90-97 (fg) and 100-107 (bg). */
 static const uint8_t ansi_bright[8][3] = {
   {128, 128, 128},  // 0 bright black (grey)
   {255,  85,  85},  // 1 bright red
@@ -86,9 +189,9 @@ static const uint8_t ansi_bright[8][3] = {
   {255, 255, 255},  // 7 bright white
 };
 
-// Default colours (used when SGR 0 is sent)
-static const uint8_t default_fg[3] = {220, 220, 220};
-static const uint8_t default_bg[3] = {  0,   0,   0};
+// Default colours (used when SGR 0 is sent) – initialised from config at startup.
+static uint8_t default_fg[3] = {220, 220, 220};
+static uint8_t default_bg[3] = {  0,   0,   0};
 
 // ---------------------------------------------------------------------------
 // Scroll operations
@@ -103,17 +206,18 @@ static const uint8_t default_bg[3] = {  0,   0,   0};
 /// @param count  Number of rows to scroll up.
 static void scroll_up(terminal_t *t, int count) {
   int cols = t->screen.cols;
-  char line_buf[COLS] = {0};
+  int *line_buf = malloc((size_t)cols * sizeof(int));
+  if (!line_buf) return;
   for (int n = 0; n < count; n++) {
-    // Copy the top row's characters into a plain buffer for scrollback
-    for (int c = 0; c < COLS && c < cols; c++)
+    // Copy the top row's codepoints into a plain buffer for scrollback
+    for (int c = 0; c < cols; c++)
       line_buf[c] = t->screen.cells[c].ch;
     scrollback_push(t->scrollback, line_buf);
 
     // Shift all rows up by one
     memmove(t->screen.cells,
             t->screen.cells + cols,
-            (size_t)(t->screen.rows - 1) * cols * sizeof(screen_cell_t));
+             ((size_t)(t->screen.rows - 1) * (size_t)cols * sizeof(screen_cell_t)));
     // Clear the new bottom row
     for (int c = 0; c < cols; c++) {
       screen_cell_t *cell = &t->screen.cells[(t->screen.rows - 1) * cols + c];
@@ -123,6 +227,7 @@ static void scroll_up(terminal_t *t, int count) {
       cell->bold = cell->italic = cell->underline = cell->blink = 0;
     }
   }
+  free(line_buf);
 }
 
 /// @brief Scroll the screen content down by `count` rows (reverse scroll).
@@ -138,7 +243,7 @@ static void scroll_down(terminal_t *t, int count) {
     // Shift all rows down by one
     memmove(t->screen.cells + cols,
             t->screen.cells,
-            (size_t)(t->screen.rows - 1) * cols * sizeof(screen_cell_t));
+             ((size_t)(t->screen.rows - 1) * (size_t)cols * sizeof(screen_cell_t)));
     // Clear the new top row
     for (int c = 0; c < cols; c++) {
       screen_cell_t *cell = &t->screen.cells[c];
@@ -169,25 +274,25 @@ static void scroll_down(terminal_t *t, int count) {
 static void handle_scrollback_keys(terminal_t *t) {
   int max_offset = scrollback_count(t->scrollback);
 
-  if (IsKeyPressed(KEY_PAGE_UP)) {
+  if (input_key_pressed(KEY_PAGE_UP)) {
     t->scroll_offset += t->screen.rows;
     if (t->scroll_offset > max_offset)
       t->scroll_offset = max_offset;
   }
-  if (IsKeyPressed(KEY_PAGE_DOWN)) {
+  if (input_key_pressed(KEY_PAGE_DOWN)) {
     t->scroll_offset -= t->screen.rows;
     if (t->scroll_offset < 0)
       t->scroll_offset = 0;
   }
 
-  bool shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+  bool shift_held = input_key_down(KEY_LEFT_SHIFT) || input_key_down(KEY_RIGHT_SHIFT);
   if (shift_held) {
-    if (IsKeyPressed(KEY_UP)) {
+    if (input_key_pressed(KEY_UP)) {
       t->scroll_offset++;
       if (t->scroll_offset > max_offset)
         t->scroll_offset = max_offset;
     }
-    if (IsKeyPressed(KEY_DOWN)) {
+    if (input_key_pressed(KEY_DOWN)) {
       t->scroll_offset--;
       if (t->scroll_offset < 0)
         t->scroll_offset = 0;
@@ -218,46 +323,131 @@ static void clear_screen(terminal_t *t) {
 // Parser callbacks – invoked by parser.c state machine.
 // ---------------------------------------------------------------------------
 
-/// @brief Handle a printable character from the child shell.
+/// @brief Handle a printable character or UTF-8 byte from the child shell.
 ///
-/// Writes the character into the current cursor cell, inheriting the
-/// active SGR colour attributes (cur_fg, cur_bg, bold, underline).
-/// Advances the cursor; scrolls up if the cursor moves past the last row.
+/// For ASCII bytes (0x20–0x7E) this writes the character directly into
+/// the current cursor cell.  For bytes >= 0x80 it accumulates multi-byte
+/// UTF-8 sequences via the terminal's utf8 decoder and only writes a
+/// complete decoded codepoint to the cell once all continuation bytes
+/// have been received.  Advances the cursor; scrolls up if the cursor
+/// moves past the last row.
 ///
-/// @param ch   Character byte.
+/// @param ch   Character byte (may be part of a multi-byte UTF-8 seq).
 /// @param ctx  Pointer to terminal_t (opaque context).
 static void on_print(uint8_t ch, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
-  if (t->cx >= t->screen.cols) {
-    t->cx = 0;
-    t->cy++;
-  }
-  if (t->cy >= t->screen.rows) {
-    scroll_up(t, 1);
-    t->cy = t->screen.rows - 1;
+
+  // Single-byte ASCII fast path
+  if (ch < 0x80) {
+    // Reset any in-progress UTF-8 sequence
+    utf8_reset(t);
+
+    if (t->cx >= t->screen.cols) {
+      t->cx = 0;
+      t->cy++;
+    }
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
+    }
+
+    screen_cell_t *cell = screen_buf_cell(&t->screen, t->cy, t->cx);
+    if (cell) {
+      cell->ch = ch;
+      cell->fg[0] = t->cur_fg[0]; cell->fg[1] = t->cur_fg[1]; cell->fg[2] = t->cur_fg[2];
+      cell->bg[0] = t->cur_bg[0]; cell->bg[1] = t->cur_bg[1]; cell->bg[2] = t->cur_bg[2];
+      cell->bold = t->cur_bold;
+      cell->underline = t->cur_underline;
+    }
+    t->cx++;
+    return;
   }
 
-  screen_cell_t *cell = screen_buf_cell(&t->screen, t->cy, t->cx);
-  if (cell) {
-    cell->ch = ch;
-    // Inherit current SGR state
-    cell->fg[0] = t->cur_fg[0]; cell->fg[1] = t->cur_fg[1]; cell->fg[2] = t->cur_fg[2];
-    cell->bg[0] = t->cur_bg[0]; cell->bg[1] = t->cur_bg[1]; cell->bg[2] = t->cur_bg[2];
-    cell->bold = t->cur_bold;
-    cell->underline = t->cur_underline;
+  // Multi-byte UTF-8: feed the byte into the decoder
+  int result = utf8_decode_byte(t, ch);
+  if (result > 0) {
+    // A complete codepoint was decoded – write it into the cell
+    if (t->cx >= t->screen.cols) {
+      t->cx = 0;
+      t->cy++;
+    }
+    if (t->cy >= t->screen.rows) {
+      scroll_up(t, 1);
+      t->cy = t->screen.rows - 1;
+    }
+
+    screen_cell_t *cell = screen_buf_cell(&t->screen, t->cy, t->cx);
+    if (cell) {
+      cell->ch = result;
+      cell->fg[0] = t->cur_fg[0]; cell->fg[1] = t->cur_fg[1]; cell->fg[2] = t->cur_fg[2];
+      cell->bg[0] = t->cur_bg[0]; cell->bg[1] = t->cur_bg[1]; cell->bg[2] = t->cur_bg[2];
+      cell->bold = t->cur_bold;
+      cell->underline = t->cur_underline;
+    }
+    t->cx++;
   }
-  t->cx++;
+  // If result == 0 (need more bytes) or result < 0 (invalid), we just
+  // accumulate or ignore – no cell write yet.
 }
 
-/// @brief Handle a C0 control character.
+/// @brief Handle a C0 or C1 control character.
 ///
 /// Processes LF, CR, BS, HT, VT, FF by moving the cursor or scrolling.
 ///
-/// @param c0   Control character byte (0x00–0x1F, excluding ESC).
+/// C0 controls (< 0x20) always terminate an in-progress UTF-8 multi-byte
+/// sequence because they cannot be UTF-8 continuation bytes.
+///
+/// C1 controls (0x80–0x9F) can also be valid UTF-8 continuation bytes
+/// (10xxxxxx pattern).  If we are in the middle of decoding a multi-byte
+/// UTF-8 character, the byte is fed to the UTF-8 decoder instead of being
+/// processed as a control.  This handles NERD Font codepoints whose second
+/// byte falls in the 0x84–0x8F range (e.g. U+E100–U+E1FF, U+E240–U+E2FF).
+///
+/// @param c0   Control character byte (may be 0x00–0x1F or 0x80–0x9F).
 /// @param ctx  Pointer to terminal_t.
 static void on_execute(char c0, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
+  unsigned char ub = (unsigned char)c0;
+
+  // C0 controls (0x00–0x1F) always reset UTF-8.
+  if (ub < 0x20) {
+    utf8_reset(t);
+  } else if (ub >= 0x80) {
+    // C1 control bytes (0x80–0x9F) may overlap with UTF-8 continuation
+    // bytes.  If we are in the middle of a multi-byte sequence, feed
+    // this byte to the UTF-8 decoder instead of executing the control.
+    if (t->utf8_remaining > 0) {
+      int result = utf8_decode_byte(t, ub);
+      if (result > 0) {
+        // A complete codepoint was decoded — write it into the cell
+        if (t->cx >= t->screen.cols) {
+          t->cx = 0;
+          t->cy++;
+        }
+        if (t->cy >= t->screen.rows) {
+          scroll_up(t, 1);
+          t->cy = t->screen.rows - 1;
+        }
+        screen_cell_t *cell = screen_buf_cell(&t->screen, t->cy, t->cx);
+        if (cell) {
+          cell->ch = result;
+          cell->fg[0] = t->cur_fg[0]; cell->fg[1] = t->cur_fg[1]; cell->fg[2] = t->cur_fg[2];
+          cell->bg[0] = t->cur_bg[0]; cell->bg[1] = t->cur_bg[1]; cell->bg[2] = t->cur_bg[2];
+          cell->bold = t->cur_bold;
+          cell->underline = t->cur_underline;
+        }
+        t->cx++;
+      }
+      // If result <= 0 (need more or invalid), we just accumulate or ignore.
+      return; // Don't process as control
+    }
+    // If not in a UTF-8 sequence, treat as a normal control. Reset state.
+    utf8_reset(t);
+  }
+
   switch (c0) {
+  default:
+    break;
   case '\n':
     t->cy++;
     if (t->cy >= t->screen.rows) {
@@ -419,12 +609,16 @@ static void on_csi(int params[16], int num_params,
                    char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
   terminal_t *t = (terminal_t *)ctx;
+  // An escape/CSI sequence breaks any in-progress UTF-8 multi-byte sequence
+  utf8_reset(t);
 
   bool dec_private = (num_intermediates > 0 && intermediates[0] == '?');
 
 #define PARAM(n) ((n) < num_params && params[(n)] >= 0 ? params[(n)] : -1)
 
   switch (final) {
+  default:
+    break;
   // ---- Cursor movement ----
   case 'A': {
     int n = PARAM(0); if (n < 0) n = 1;
@@ -610,8 +804,12 @@ static void on_esc(char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
   (void)intermediates; (void)num_intermediates;
   terminal_t *t = (terminal_t *)ctx;
+  // An ESC sequence breaks any in-progress UTF-8 multi-byte sequence
+  utf8_reset(t);
 
   switch (final) {
+  default:
+    break;
   case '7': // DECSC – save cursor
     t->saved_cx = t->cx; t->saved_cy = t->cy;
     break;
@@ -654,7 +852,9 @@ static void on_esc(char intermediates[2], int num_intermediates,
 /// @param str  OSC string payload.
 /// @param ctx  Unused.
 static void on_osc(int cmd, const char *str, void *ctx) {
-  (void)cmd; (void)str; (void)ctx;
+  (void)cmd; (void)str;
+  terminal_t *t = (terminal_t *)ctx;
+  utf8_reset(t);
 }
 
 /// @brief DCS handler (Device Control String) – currently a no-op.
@@ -662,24 +862,26 @@ static void on_osc(int cmd, const char *str, void *ctx) {
 /// @param str  DCS string payload.
 /// @param ctx  Unused.
 static void on_dcs(int cmd, const char *str, void *ctx) {
-  (void)cmd; (void)str; (void)ctx;
+  (void)cmd; (void)str;
+  terminal_t *t = (terminal_t *)ctx;
+  utf8_reset(t);
 }
 
 // ---------------------------------------------------------------------------
 // PTY helpers
 // ---------------------------------------------------------------------------
 
-/// @brief Fork a child process attached to a pseudo-terminal.
+/// @brief Fork a PTY and set initial window size.
 ///
 /// The child executes the user's login shell (SHELL env var, or /bin/sh).
-/// Returns the master file descriptor for communication.
-///
+/// @param rows  Initial terminal rows (from config, updated after font load).
+/// @param cols  Initial terminal columns (from config, updated after font load).
 /// @return Master PTY file descriptor, or -1 on failure.
-static int pty_fork(void) {
+static int pty_fork(int rows, int cols) {
   int master_fd;
   struct winsize ws = {
-    .ws_row = ROWS,
-    .ws_col = COLS,
+    .ws_row = (unsigned short)rows,
+    .ws_col = (unsigned short)cols,
     .ws_xpixel = 0,
     .ws_ypixel = 0,
   };
@@ -688,7 +890,7 @@ static int pty_fork(void) {
   if (pid == 0) {
     const char *shell = getenv("SHELL");
     if (!shell) shell = "/bin/sh";
-    execl(shell, shell, NULL);
+    execl(shell, shell, "-i", (char *)NULL);
     perror("execl");
     _exit(1);
   }
@@ -840,22 +1042,69 @@ static void handle_mouse(terminal_t *t, int fd, float char_w, float char_h) {
 /// 1 px horizontal offset (pseudo-bold).  If underline is set a
 /// horizontal line is drawn below the glyph.
 ///
-/// @param font    Font handle (must be initialised).
-/// @param cell    Screen cell with character and colour attributes.
-/// @param x       Pixel X position of the cell.
-/// @param y       Pixel Y position of the cell.
-/// @param char_w  Character width in pixels.
-/// @param char_h  Character height in pixels.
+/// @param f     Font handle (must be initialised).
+/// @param cp    Unicode codepoint to check.
+/// @return      true if the font has a non-zero atlas rectangle for this glyph.
+/// Check whether a font actually has renderable data for a given codepoint.
+///
+#if 0
+/// GetGlyphIndex alone is NOT sufficient because LoadFontEx pre-allocates
+/// glyph entries for every codepoint in the request list (setting .value),
+/// but empty entries have zero atlas rectangles.
+///
+/// GetGlyphAtlasRec() is also NOT reliable because it has a built-in
+/// fallback to '?' — if the codepoint is not found it silently returns
+/// the rectangle for '?', making every check appear to succeed.
+///
+/// Instead we access f->recs[] directly (avoids the '?' fallback).
+static bool font_has_glyph(const Font *f, int cp) {
+  if (!f || f->texture.id == 0 || !f->glyphs || !f->recs) return false;
+  int idx = GetGlyphIndex(*f, cp);
+  if (idx < 0 || idx >= f->glyphCount) return false;
+  // Direct recs array access — no '?' fallback.
+  // Unfound glyphs have recs[idx] = {0,0,0,0} from GenTextureFontAtlas's
+  // calloc; found glyphs have a non-zero rectangle.
+  return f->recs[idx].width > 0 && f->recs[idx].height > 0;
+}
+#endif
+
+#if 0
+/// Pick the best font for rendering a codepoint.
+/// Returns the font where the glyph is available, falling back
+/// through: current (regular, e.g. Maple Mono) → nerd (NERD PUA icons)
+/// → symbols (e.g. Noto Sans Symbols 2) → '?' fallback.
+static __attribute__((unused)) Font* pick_glyph_font(font_handle_t *font, int *cp) {
+  // Control chars → space
+  if (*cp < 0x20 && *cp != '\t') *cp = ' ';
+
+  // 1. Current (regular) font — best-looking letters for everyday text
+  if (font_has_glyph(font->current, *cp))
+    return font->current;
+
+  // 2. Nerd Font — PUA icons (Powerline, Devicons, etc.) not in regular
+  if (font_has_glyph(&font->nerd, *cp))
+    return &font->nerd;
+
+  // 3. Symbols fallback (Noto Sans Symbols 2 etc.)
+  if (font_has_glyph(&font->symbols, *cp))
+    return &font->symbols;
+
+  // 4. '?' in current font (which always has ASCII)
+  *cp = '?';
+  return font->current;
+}
+#endif
+
 static void render_cell(font_handle_t *font, const screen_cell_t *cell,
                         float x, float y, float char_w, float char_h) {
+  (void)font; (void)cell; (void)x; (void)y; (void)char_w; (void)char_h;
+  return;
+#if 0
   if (!font || !cell) return;
 
-  // Determine the glyph to draw
   int cp = cell->ch;
-  if (cp < 0x20 && cp != '\t')
-    cp = ' ';
-  if (cp >= 0x80)
-    cp = cell->ch; // pass through UTF-8 leader bytes
+  Font *render_font = pick_glyph_font(font, &cp);
+  if (!render_font) return;
 
   bool has_bg = (cell->bg[0] != 0 || cell->bg[1] != 0 || cell->bg[2] != 0);
 
@@ -869,17 +1118,15 @@ static void render_cell(font_handle_t *font, const screen_cell_t *cell,
   Color fg_col = { cell->fg[0], cell->fg[1], cell->fg[2], 255 };
 
   // Bold effect: if bold, render twice with a 1px offset for a pseudo-bold look
-  if (cell->bold && font->current) {
-    DrawTextCodepoints(*font->current, &cp, 1,
-                       (Vector2){ x + 1.0f, y + font->ascent },
+  if (cell->bold) {
+    DrawTextCodepoints(*render_font, &cp, 1,
+                       (Vector2){ x + 1.0f, y },
                        font->font_size, font->spacing, fg_col);
   }
 
-  if (font->current) {
-    DrawTextCodepoints(*font->current, &cp, 1,
-                       (Vector2){ x, y + font->ascent },
-                       font->font_size, font->spacing, fg_col);
-  }
+  DrawTextCodepoints(*render_font, &cp, 1,
+                      (Vector2){ x, y },
+                      font->font_size, font->spacing, fg_col);
 
   // Underline effect
   if (cell->underline) {
@@ -887,33 +1134,49 @@ static void render_cell(font_handle_t *font, const screen_cell_t *cell,
     DrawLine((int)x, (int)underline_y,
              (int)(x + char_w), (int)underline_y, fg_col);
   }
+#endif
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Terminal emulator entry point.
+ *
+ * Initialises (in order):
+ *   1. PTY master/slave via forkpty() (must happen before raylib init)
+ *   2. Raylib window (resizable)
+ *   3. Font subsystem (auto-discovers regular, Nerd, and symbol fonts)
+ *   4. Screen buffer, scrollback, terminal state
+ *   5. Parser callbacks wired to terminal_t methods
+ *
+ * Main loop:
+ *   - Drains PTY output and feeds it to the parser
+ *   - Adjusts scrollback viewport when new output arrives while browsing history
+ *   - Handles scrollback navigation keys
+ *   - Forwards keyboard input to the PTY
+ *   - Resizes PTY on window resize
+ *   - Detects and recovers from stuck parser states
+ *   - Renders the screen (normal or scrollback viewport mode)
+ *
+ * @return 0 on success, 1 on initialisation failure.
+ */
 int main(void) {
-  SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-  InitWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm");
+  // ── Load configuration ──────────────────────────────────────────────
+  const dicterm_config_t cfg = config_load();
+  WIN_WIDTH = cfg.win_width;
+  WIN_HEIGHT = cfg.win_height;
+  WIN_PADDING = cfg.win_padding;
+  memcpy(default_fg, cfg.default_fg, sizeof(default_fg));
+  memcpy(default_bg, cfg.default_bg, sizeof(default_bg));
 
-  // Font subsystem
-  font_handle_t *font = font_init(NULL, NULL, 20.0f);
-  if (!font) {
-    fprintf(stderr, "dicTerm: Failed to initialise fonts.\n");
-    CloseWindow();
-    return 1;
-  }
-  SetTargetFPS(60);
-
-  float char_w = font_char_width(font);
-  float char_h = font_char_height(font);
-
-  // PTY
-  int master_fd = pty_fork();
+  // PTY must be forked BEFORE raylib/GLFW initialisation, because
+  // raylib installs signal handlers and may spawn helper threads
+  // that would interfere with the child process after forkpty().
+  int master_fd = pty_fork(cfg.rows, cfg.cols);
   if (master_fd < 0) {
-    font_uninit(font);
-    CloseWindow();
+    fprintf(stderr, "dicTerm: pty_fork failed.\n");
     return 1;
   }
 
@@ -922,22 +1185,95 @@ int main(void) {
   if (fcntl(master_fd, F_SETFL, fl | O_NONBLOCK) == -1)
     perror("fcntl F_SETFL");
 
-  // Terminal state
-  terminal_t term = {0};
-  term.screen = *screen_buf_new(ROWS, COLS);
-  if (!term.screen.cells) {
+  if (!glfwInit()) {
+    fprintf(stderr, "dicTerm: glfwInit failed.\n");
     close(master_fd);
+    return 1;
+  }
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+  GLFWwindow *window = glfwCreateWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm", NULL, NULL);
+  if (!window) {
+    fprintf(stderr, "dicTerm: glfwCreateWindow failed.\n");
+    glfwTerminate(); close(master_fd); return 1;
+  }
+  glfwMakeContextCurrent(window);
+  glfwSwapInterval(1);
+  input_init(window);
+
+  // Font subsystem
+  font_handle_t *font = font_init(
+      cfg.font_regular[0] ? cfg.font_regular : NULL,
+      cfg.font_nerd[0]    ? cfg.font_nerd    : NULL,
+      cfg.font_size);
+  if (!font) {
+    fprintf(stderr, "dicTerm: Failed to initialise fonts.\n");
+    close(master_fd);
+    glfwDestroyWindow(window); glfwTerminate();
+    return 1;
+  }
+  gl_renderer_t *gl_renderer = gl_renderer_create(font);
+  if (!gl_renderer) {
+    fprintf(stderr, "dicTerm: Failed to initialise the OpenGL renderer.\n");
     font_uninit(font);
-    CloseWindow();
+    close(master_fd);
+    glfwDestroyWindow(window);
+    glfwTerminate();
     return 1;
   }
 
-  term.scrollback = scrollback_create(SCROLLBACK_CAPACITY, COLS);
+  // Show which fonts are loaded in the window title
+  {
+    char title[256];
+    const char *reg = font->regular_path[0] ? font->regular_path : "default";
+    const char *nerd_name = font->nerd_path[0] ? font->nerd_path : "none";
+    const char *sym = font_find_symbols_path();
+    if (!sym) sym = "none";
+    // Extract just the filename for readability
+    const char *reg_file = strrchr(reg, '/');
+    reg_file = reg_file ? reg_file + 1 : reg;
+    const char *nerd_file = strrchr(nerd_name, '/');
+    nerd_file = nerd_file ? nerd_file + 1 : nerd_name;
+    const char *sym_file = strrchr(sym, '/');
+    sym_file = sym_file ? sym_file + 1 : sym;
+    snprintf(title, sizeof(title), "dicTerm [%s] nerd=%s sym=%s",
+             reg_file, nerd_file, sym_file);
+    glfwSetWindowTitle(window, title);
+  }
+
+  float char_w = font_char_width(font);
+  float char_h = font_char_height(font);
+
+  // Compute terminal grid dimensions from window size and font metrics
+  int term_rows = (WIN_HEIGHT - WIN_PADDING * 2) / (int)char_h;
+  int term_cols = (WIN_WIDTH - WIN_PADDING * 2) / (int)char_w;
+  if (term_rows < 1) term_rows = 1;
+  if (term_cols < 1) term_cols = 1;
+
+  // Terminal state
+  terminal_t term = {0};
+  {
+    screen_buf_t *sb = screen_buf_new(term_rows, term_cols);
+    if (!sb) {
+      close(master_fd);
+      gl_renderer_destroy(gl_renderer);
+      font_uninit(font);
+      glfwDestroyWindow(window); glfwTerminate();
+      return 1;
+    }
+    term.screen = *sb;  // copy the struct (includes cells pointer)
+    free(sb);           // free the wrapper only; cells survive via term.screen.cells
+  }
+
+  term.scrollback = scrollback_create(cfg.scrollback_capacity, term_cols);
   if (!term.scrollback) {
-    screen_buf_free(&term.screen);
+    free(term.screen.cells);
     close(master_fd);
+    gl_renderer_destroy(gl_renderer);
     font_uninit(font);
-    CloseWindow();
+    glfwDestroyWindow(window); glfwTerminate();
     return 1;
   }
 
@@ -961,27 +1297,46 @@ int main(void) {
   int parser_stuck_frames = 0;
   parser_state_t prev_parser_state = PARSER_GROUND;
 
+  // Reusable codepoint scratch buffer for scrollback viewport rendering
+  // (allocated once; size tracks the current screen width in columns).
+  int *line_buf = malloc((size_t)term_cols * sizeof(int));
+  if (!line_buf) {
+    fprintf(stderr, "dicTerm: Out of memory.\n");
+    close(master_fd);
+    scrollback_destroy(term.scrollback);
+    free(term.screen.cells);
+    gl_renderer_destroy(gl_renderer);
+    font_uninit(font);
+    glfwDestroyWindow(window); glfwTerminate();
+    return 1;
+  }
+
   // ---- Main loop ----
-  while (!WindowShouldClose()) {
+  while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
     // Capture scrollback total before draining PTY, so we can detect
     // how many new lines were pushed and adjust the viewport offset
     // to keep the user's scroll position stable.
     int sb_total_before = scrollback_total_pushed(term.scrollback);
 
     // Drain PTY output
+    bool in_error_state = false;
     for (;;) {
       char buf[65536];
       ssize_t n = read(master_fd, buf, sizeof(buf));
       if (n > 0) {
         parser_feed(&term.parser, (const uint8_t *)buf, (size_t)n);
       } else if (n == 0) {
-        goto done;
+        in_error_state = true;
+        break;
       } else {
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
         perror("read");
-        goto done;
+        in_error_state = true;
+        break;
       }
     }
+    if (in_error_state) break;
 
     // If new lines were pushed to the scrollback while we were in
     // scrollback mode, adjust the offset so the viewport stays
@@ -1014,8 +1369,9 @@ int main(void) {
     handle_mouse(&term, master_fd, char_w, char_h);
 
     // Window resize → PTY
-    int new_w = GetScreenWidth();
-    int new_h = GetScreenHeight();
+    int new_w = 0;
+    int new_h = 0;
+    glfwGetFramebufferSize(window, &new_w, &new_h);
     if (new_w != term.win_width || new_h != term.win_height) {
       term.win_width  = new_w;
       term.win_height = new_h;
@@ -1024,6 +1380,7 @@ int main(void) {
       if (new_cols < 1) new_cols = 1;
       if (new_rows < 1) new_rows = 1;
       pty_resize(master_fd, new_cols, new_rows);
+      screen_buf_resize(&term.screen, new_rows, new_cols);
     }
 
     // Parser stuck detection
@@ -1033,6 +1390,7 @@ int main(void) {
         if (cur == prev_parser_state) {
           parser_stuck_frames++;
           if (parser_stuck_frames >= STUCK_FRAME_LIMIT) {
+            utf8_reset(&term);
             parser_reset(&term.parser);
             parser_stuck_frames = 0;
           }
@@ -1046,8 +1404,12 @@ int main(void) {
     }
 
     // ---- Render ----
-    BeginDrawing();
-    ClearBackground((Color){ 15, 20, 25, 255 });
+    glViewport(0, 0, term.win_width, term.win_height);
+    glClearColor((float)default_bg[0] / 255.0f,
+                 (float)default_bg[1] / 255.0f,
+                 (float)default_bg[2] / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (gl_renderer) gl_renderer_begin(gl_renderer, term.win_width, term.win_height);
 
     int screen_rows = term.screen.rows;
     int sb_count = scrollback_count(term.scrollback);
@@ -1057,7 +1419,7 @@ int main(void) {
       // The viewport is shifted up by scroll_offset lines.
       // Top portion: scrollback lines (old history).
       // Bottom portion: the current visible screen (shifted up).
-      char line[COLS];
+      int *line = line_buf;
       for (int r = 0; r < screen_rows; r++) {
         float y = (float)WIN_PADDING + (float)r * char_h;
 
@@ -1067,25 +1429,36 @@ int main(void) {
         int sb_idx = term.scroll_offset - 1 - r;
 
         if (sb_idx >= 0 && sb_idx < sb_count) {
-          // Render from scrollback buffer (char-only, default colours)
-          if (scrollback_get(term.scrollback, sb_idx, line, COLS)) {
+          // Render from scrollback buffer (codepoints, default colours)
+          if (scrollback_get(term.scrollback, sb_idx, line, term_cols)) {
+            screen_cell_t *scroll_cells = calloc((size_t)term.screen.cols,
+                                                  sizeof(*scroll_cells));
             for (int c = 0; c < term.screen.cols; c++) {
-              float x = (float)WIN_PADDING + (float)c * char_w;
-              screen_cell_t sc;
-              sc.ch = (uint8_t)line[c];
-              sc.fg[0] = default_fg[0]; sc.fg[1] = default_fg[1];
-              sc.fg[2] = default_fg[2];
-              sc.bg[0] = default_bg[0]; sc.bg[1] = default_bg[1];
-              sc.bg[2] = default_bg[2];
-              sc.bold = 0;
-              sc.underline = 0;
-              render_cell(term.font, &sc, x, y, char_w, char_h);
+              if (scroll_cells) {
+                scroll_cells[c].ch = line[c];
+                scroll_cells[c].fg[0] = default_fg[0];
+                scroll_cells[c].fg[1] = default_fg[1];
+                scroll_cells[c].fg[2] = default_fg[2];
+              }
+            }
+            if (scroll_cells) {
+              if (gl_renderer)
+                gl_renderer_draw_cells(gl_renderer, scroll_cells,
+                                       term.screen.cols,
+                                       (float)WIN_PADDING, y,
+                                       char_w, char_h);
+              free(scroll_cells);
             }
           }
         } else {
           // Scrollback lines exhausted – show the corresponding screen line
           int screen_row = r - term.scroll_offset;
           if (screen_row >= 0 && screen_row < term.screen.rows) {
+            if (gl_renderer)
+              gl_renderer_draw_cells(gl_renderer,
+                                     &term.screen.cells[screen_row * term.screen.cols],
+                                     term.screen.cols, (float)WIN_PADDING, y,
+                                     char_w, char_h);
             for (int c = 0; c < term.screen.cols; c++) {
               float x = (float)WIN_PADDING + (float)c * char_w;
               const screen_cell_t *cell =
@@ -1097,6 +1470,7 @@ int main(void) {
         }
       }
 
+      #if 0
       // Scrollback indicator bar at the bottom
       {
         int indicator_y = WIN_PADDING + screen_rows * (int)char_h;
@@ -1115,6 +1489,7 @@ int main(void) {
           (void)len;
         }
       }
+      #endif
     } else {
       // ── Normal terminal mode ────────────────────────────────────
       for (int r = 0; r < term.screen.rows; r++) {
@@ -1127,6 +1502,17 @@ int main(void) {
         }
       }
 
+      if (gl_renderer) {
+        for (int r = 0; r < term.screen.rows; r++) {
+          gl_renderer_draw_cells(gl_renderer,
+                                 &term.screen.cells[r * term.screen.cols],
+                                 term.screen.cols, (float)WIN_PADDING,
+                                 (float)WIN_PADDING + (float)r * char_h,
+                                 char_w, char_h);
+        }
+      }
+
+      #if 0
       // Cursor: inverted block (only in normal mode)
       {
         float cx = (float)WIN_PADDING + (float)term.cx * char_w;
@@ -1137,20 +1523,24 @@ int main(void) {
         int cp = term.screen.cells[term.cy * term.screen.cols + term.cx].ch;
         if (cp < 0x20) cp = ' ';
         DrawTextCodepoints(*font->current, &cp, 1,
-                           (Vector2){ cx, cy + font->ascent },
+                           (Vector2){ cx, cy },
                            font->font_size, font->spacing,
                            (Color){ 15, 20, 25, 255 });
       }
+      #endif
     }
 
-    EndDrawing();
+    if (gl_renderer) gl_renderer_end(gl_renderer);
+    glfwSwapBuffers(window);
   }
 
-done:
   close(master_fd);
   scrollback_destroy(term.scrollback);
-  screen_buf_free(&term.screen);
+  free(term.screen.cells);
+  free(line_buf);
+  gl_renderer_destroy(gl_renderer);
   font_uninit(font);
-  CloseWindow();
+  glfwDestroyWindow(window);
+  glfwTerminate();
   return 0;
 }

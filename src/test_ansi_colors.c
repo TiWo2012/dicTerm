@@ -32,11 +32,6 @@ static int  tests_passed = 0;
   tests_passed++;   \
 } while(0)
 
-#define FAIL(msg) do { \
-  printf("FAIL: %s\n", msg); \
-  return;               \
-} while(0)
-
 // ---------------------------------------------------------------------------
 // State captured from callbacks for test verification
 // ---------------------------------------------------------------------------
@@ -336,10 +331,11 @@ static void test_no_param_sgr(void) {
   // The main.c handler checks num_params == 0 and treats it as reset
 }
 
-/// @brief 8-bit CSI (0x9B) SGR with red foreground.
+/// @brief 7-bit CSI (ESC [) SGR with red foreground.
 static void test_8bit_csi(void) {
+  // 7-bit CSI: ESC [ 31 m
   int expected[] = {31};
-  check_csi("8-bit CSI SGR", "\x9B" "31m", expected, 1, 'm');
+  check_csi("7-bit CSI SGR", "\x1B[31m", expected, 1, 'm');
 }
 
 // ---- Extended colour (256-colour and truecolor) tests ----
@@ -454,7 +450,7 @@ int main(void) {
   TEST("print after SGR");                   test_print_after_sgr();        PASS();
   TEST("multiple SGR (31;42;1)");            test_multiple_sgr();           PASS();
   TEST("no-param SGR (ESC[m)");              test_no_param_sgr();           PASS();
-  TEST("8-bit CSI SGR");                     test_8bit_csi();               PASS();
+  TEST("7-bit CSI SGR");                     test_8bit_csi();               PASS();
 
   TEST("ext fg 256 (38;5;10)");              test_extended_fg_256();        PASS();
   TEST("ext fg truecolor (38;2;R;G;B)");     test_extended_fg_truecolor();  PASS();

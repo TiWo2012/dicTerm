@@ -1,9 +1,19 @@
+/**
+ * @file parser.c
+ * @brief ANSI escape sequence parser implementation.
+ *
+ * Implements a callback-driven ECMA-48 state machine that processes
+ * terminal byte streams character by character.  Supports all major
+ * sequence types: CSI, OSC, DCS, ESC, SOS/PM/APC, C0 controls, and
+ * printable text with UTF-8 compatible ground-state handling.
+ */
 #include "parser.h"
 #include <string.h>
 
 // ---------------------------------------------------------------------------
 // Reset parameter / intermediate accumulators for a new sequence.
 // ---------------------------------------------------------------------------
+/** @brief Reset parameter and intermediate accumulators for a new sequence. */
 static void reset_accumulators(parser_t *p) {
   p->num_params = 0;
   for (int i = 0; i < PARSER_MAX_PARAMS; i++)
@@ -15,6 +25,7 @@ static void reset_accumulators(parser_t *p) {
 // ---------------------------------------------------------------------------
 // Start a new parameter (called when ';' is encountered in CSI_PARAM).
 // ---------------------------------------------------------------------------
+/** @brief Advance to the next parameter slot when ';' is encountered. */
 static void next_param(parser_t *p) {
   if (p->num_params < PARSER_MAX_PARAMS - 1) {
     p->num_params++;
@@ -27,6 +38,7 @@ static void next_param(parser_t *p) {
 // ---------------------------------------------------------------------------
 // Append a digit to the current parameter.
 // ---------------------------------------------------------------------------
+/** @brief Append a digit to the current parameter value (clamped to 999999). */
 static void accum_param(parser_t *p, char digit) {
   int idx = p->num_params;
   if (idx >= PARSER_MAX_PARAMS)
@@ -43,6 +55,7 @@ static void accum_param(parser_t *p, char digit) {
 // ---------------------------------------------------------------------------
 // Append an intermediate byte.
 // ---------------------------------------------------------------------------
+/** @brief Append an intermediate byte (up to PARSER_MAX_INTERMEDIATES). */
 static void accum_intermediate(parser_t *p, char b) {
   if (p->num_intermediates < PARSER_MAX_INTERMEDIATES) {
     p->intermediates[p->num_intermediates++] = b;
@@ -52,11 +65,13 @@ static void accum_intermediate(parser_t *p, char b) {
 // ---------------------------------------------------------------------------
 // OSC helpers
 // ---------------------------------------------------------------------------
+/** @brief Append a byte to the OSC string buffer. */
 static void osc_append(parser_t *p, char b) {
   if (p->osc_len < (int)(sizeof(p->osc_string) - 1))
     p->osc_string[p->osc_len++] = b;
 }
 
+/** @brief Dispatch the completed OSC string to the on_osc callback. */
 static void osc_dispatch(parser_t *p) {
   p->osc_string[p->osc_len] = '\0';
   // Parse the command number from the string (digits before first ';').
@@ -81,11 +96,13 @@ static void osc_dispatch(parser_t *p) {
 // ---------------------------------------------------------------------------
 // DCS helpers
 // ---------------------------------------------------------------------------
+/** @brief Append a byte to the DCS string buffer. */
 static void dcs_append(parser_t *p, char b) {
   if (p->dcs_len < (int)(sizeof(p->dcs_string) - 1))
     p->dcs_string[p->dcs_len++] = b;
 }
 
+/** @brief Dispatch the completed DCS string to the on_dcs callback. */
 static void dcs_dispatch(parser_t *p) {
   p->dcs_string[p->dcs_len] = '\0';
   if (p->callbacks.on_dcs)
@@ -95,11 +112,13 @@ static void dcs_dispatch(parser_t *p) {
 // ---------------------------------------------------------------------------
 // String helpers (SOS/PM/APC)
 // ---------------------------------------------------------------------------
+/** @brief Append a byte to the SOS/PM/APC string buffer. */
 static void string_append(parser_t *p, char b) {
   if (p->string_len < (int)(sizeof(p->string_buf) - 1))
     p->string_buf[p->string_len++] = b;
 }
 
+/** @brief Dispatch the completed SOS/PM/APC string to the on_string callback. */
 static void string_dispatch(parser_t *p) {
   p->string_buf[p->string_len] = '\0';
   if (p->callbacks.on_string)
@@ -109,6 +128,7 @@ static void string_dispatch(parser_t *p) {
 // ---------------------------------------------------------------------------
 // Ground state handler
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte while in the GROUND state (default state). */
 static void ground(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x00 ... 0x17:
@@ -133,41 +153,12 @@ static void ground(parser_t *p, uint8_t b) {
     break;
   case 0x7F: // DEL – ignore
     break;
-  // 8-bit C1 controls (we handle 7-bit equivalents via ESC, but accept
-  // these for robustness).
-  case 0x84 ... 0x87: // IND, NEL, HTS, etc.
-  case 0x89 ... 0x8B:
-  case 0x8D:
-  case 0x8E:
-  case 0x8F: // PU1 – treat as execute
-    if (p->callbacks.on_execute)
-      p->callbacks.on_execute((char)b, p->ctx);
-    break;
-  case 0x90: // DCS (8-bit)
-    p->state = PARSER_DCS;
-    reset_accumulators(p);
-    p->dcs_len = 0;
-    break;
-  case 0x98: // SOS (8-bit)
-    p->state = PARSER_SOS_PM_APC_STRING;
-    p->string_len = 0;
-    break;
-  case 0x9B: // CSI (8-bit)
-    p->state = PARSER_CSI_PARAM;
-    reset_accumulators(p);
-    break;
-  case 0x9D: // OSC (8-bit)
-    p->state = PARSER_OSC;
-    p->osc_len = 0;
-    break;
-  case 0x9E: // PM (8-bit)
-  case 0x9F: // APC (8-bit)
-    p->state = PARSER_SOS_PM_APC_STRING;
-    p->string_len = 0;
-    break;
+  // Note: 8-bit C1 controls (0x80–0x9F) are intentionally NOT handled
+  // here.  These bytes conflict with UTF-8 continuation bytes
+  // (10xxxxxx pattern).  In a modern UTF-8 terminal, all bytes >= 0x80
+  // in the GROUND state are UTF-8 data.  C1 controls are represented
+  // using their 7-bit ESC sequences (e.g. ESC [ for CSI, ESC ] for OSC).
   default:
-    // Pass through bytes >= 0x80 as printable (UTF-8 multi-byte sequences,
-    // Nerd Font icons, etc.).
     if (b >= 0x80 && p->callbacks.on_print)
       p->callbacks.on_print(b, p->ctx);
     break;
@@ -177,6 +168,7 @@ static void ground(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // ESC state handler – received 0x1B, waiting for the next byte.
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the ESC state (after receiving 0x1B). */
 static void esc_state(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x00 ... 0x17:
@@ -242,6 +234,7 @@ static void esc_state(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // CSI param state – collecting parameter bytes and private markers.
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the CSI parameter collection state. */
 static void csi_param(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x00 ... 0x17:
@@ -299,6 +292,7 @@ static void csi_param(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // CSI intermediate state – collecting intermediate bytes before final.
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the CSI intermediate collection state. */
 static void csi_intermediate(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x00 ... 0x17:
@@ -348,6 +342,7 @@ static void csi_intermediate(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // OSC state – collecting OSC string.
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the OSC string collection state. */
 static void osc_state(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x07: // BEL terminates OSC
@@ -376,6 +371,7 @@ static void osc_state(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // DCS state – collecting DCS string.
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the DCS string collection state. */
 static void dcs_state(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x07: // BEL terminates
@@ -408,6 +404,7 @@ static void dcs_state(parser_t *p, uint8_t b) {
 // ---------------------------------------------------------------------------
 // SOS/PM/APC string state
 // ---------------------------------------------------------------------------
+/** @brief Handle a byte in the SOS/PM/APC string state. */
 static void sos_pm_apc_string(parser_t *p, uint8_t b) {
   switch (b) {
   case 0x07: // BEL terminates
@@ -440,6 +437,17 @@ static void sos_pm_apc_string(parser_t *p, uint8_t b) {
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Initialise the parser state machine.
+ *
+ * Zeroes the parser struct, sets state to GROUND, copies the callbacks
+ * (may be NULL, in which case all are ignored), and stores the user
+ * context pointer.
+ *
+ * @param p         Parser instance to initialise.
+ * @param callbacks Callback table (may be NULL).
+ * @param ctx       Opaque user pointer passed back through callbacks.
+ */
 void parser_init(parser_t *p, const parser_callbacks_t *callbacks, void *ctx) {
   memset(p, 0, sizeof(*p));
   p->state = PARSER_GROUND;
@@ -449,6 +457,15 @@ void parser_init(parser_t *p, const parser_callbacks_t *callbacks, void *ctx) {
   reset_accumulators(p);
 }
 
+/**
+ * @brief Reset the parser to its initial GROUND state.
+ *
+ * Clears all accumulators (params, intermediates, OSC/DCS/string buffers)
+ * and returns the state machine to the GROUND state.  Useful after an
+ * error or when discarding partial input.
+ *
+ * @param p  Parser instance to reset.
+ */
 void parser_reset(parser_t *p) {
   p->state = PARSER_GROUND;
   reset_accumulators(p);
@@ -457,6 +474,17 @@ void parser_reset(parser_t *p) {
   p->string_len = 0;
 }
 
+/**
+ * @brief Feed one byte into the parser state machine.
+ *
+ * Dispatches to the appropriate state handler based on the current
+ * parser state.  May invoke zero or more callbacks.  Handles the
+ * two-byte ST terminator (ESC \) for OSC, DCS, and SOS/PM/APC strings
+ * by looking back at the last buffered byte.
+ *
+ * @param p  Parser instance.
+ * @param b  The byte to process.
+ */
 void parser_advance(parser_t *p, uint8_t b) {
   // Handle ST (string terminator ESC \) by checking if we're in a
   // string-collecting state and the previous byte was ESC (0x1B).
@@ -540,6 +568,15 @@ void parser_advance(parser_t *p, uint8_t b) {
   }
 }
 
+/**
+ * @brief Feed a buffer of bytes into the parser.
+ *
+ * Convenience wrapper around parser_advance() for bulk data.
+ *
+ * @param p   Parser instance.
+ * @param buf Input buffer.
+ * @param len Number of bytes to process.
+ */
 void parser_feed(parser_t *p, const uint8_t *buf, size_t len) {
   for (size_t i = 0; i < len; i++)
     parser_advance(p, buf[i]);

@@ -1,0 +1,30 @@
+# dicTerm configuration file  (Unix .conf style: "key = value")
+# ─────────────────────────────────────────────────────────────────────────────
+# Install:  cp dicTerm.conf.example ~/.config/dicTerm/dicTerm.conf
+#           (or /etc/dicTerm.conf for a system-wide default)
+#
+# All settings are OPTIONAL.  Lines starting with # or ; are comments.
+# Unknown keys are silently ignored.  Values are not case-sensitive.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Terminal geometry ───────────────────────────────────────────────────────
+rows         = 36        # visible terminal rows
+cols         = 100       # visible terminal columns
+scrollback   = 1000      # scrollback history lines kept (ring buffer)
+font_size    = 20.0      # font point size in pixels
+
+# ── Window ──────────────────────────────────────────────────────────────────
+window_width  = 1280     # initial window width in pixels
+window_height = 800      # initial window height in pixels
+window_padding = 10      # padding around the terminal text area, in pixels
+
+# ── Fonts ───────────────────────────────────────────────────────────────────
+# Leave empty to auto-discover from common system font directories.
+font_regular  =          # regular monospace font (e.g. Maple Mono)
+font_nerd      =          # Nerd Font variant (PUA icons, powerline, devicons)
+font_symbols   =          # symbol fallback (e.g. Noto Sans Symbols 2)
+
+# ── Colours ─────────────────────────────────────────────────────────────────
+# Default text and background as "R,G,B" (each 0–255).
+foreground = 220,220,220
+background = 0,0,0
