@@ -9,7 +9,8 @@ output to a raylib window, and forwards keyboard input.  ANSI SGR colour
 attributes (foreground, background, bold, underline) with full 24-bit RGB and
 256-colour palette support are implemented.  Font rendering with Nerd Fonts
 is functional.  Scrollback history viewing with viewport navigation is
-implemented.  Richer terminal features are on the roadmap.
+implemented.  Mouse reporting (xterm tracking modes with legacy and SGR
+encodings) is implemented.  Richer terminal features are on the roadmap.
 
 ## Dependencies
 
@@ -42,7 +43,8 @@ build/test_parser                 # direct
 build/test_scrollback             # direct
 build/test_screen                 # screen buffer tests
 build/test_ansi_colors            # ANSI colour parsing tests
-ctest --test-dir build            # via CTest (all 4 suites)
+build/test_mouse                  # mouse encoding tests
+ctest --test-dir build            # via CTest (all 5 suites)
 ```
 
 ## Usage
@@ -67,9 +69,31 @@ buffer (default 1000 lines).  You can navigate the history with:
 | `Shift` + `↑` | Scroll up one line |
 | `Shift` + `↓` | Scroll down one line |
 
+You can also scroll the history with the **mouse wheel** whenever the
+running application has not enabled mouse reporting.
+
 While browsing history, a "`-- Scrollback (offset/count) --`" indicator is
 shown at the bottom of the window.  Press any regular key (letter, Enter,
 Ctrl+C, etc.) to return to the normal terminal view.
+
+### Mouse support
+
+When an application enables mouse tracking, pointer events are forwarded to
+it so you can click, drag and scroll inside programs such as `vim`, `tmux`,
+`htop` and `less`.  The following xterm DEC private modes are recognised:
+
+| Mode | Meaning |
+|------|---------|
+| `?9`    | X10 compatibility – button press only |
+| `?1000` | Normal tracking – button press and release |
+| `?1002` | Button-event tracking – adds motion while a button is held |
+| `?1003` | Any-event tracking – reports all pointer motion |
+| `?1006` | SGR extended coordinate encoding |
+
+Both the legacy X10 encoding (`CSI M Cb Cx Cy`) and the SGR encoding
+(`CSI < Cb ; Cx ; Cy M`/`m`) are supported, including Shift/Alt/Ctrl
+modifier bits and mouse-wheel reporting.  When no application has enabled
+tracking, the wheel scrolls the local scrollback viewport instead.
 
 ### Nerd Fonts
 
@@ -81,12 +105,13 @@ switch between standard and Nerd Fonts at runtime via the API.
 ## Project structure
 
 ```
-├── CMakeLists.txt          # Build: dicTerm + 4 test executables
+├── CMakeLists.txt          # Build: dicTerm + 5 test executables
 ├── Doxyfile                # Doxygen documentation configuration
 ├── include/
 │   ├── parser.h            # ECMA-48 escape sequence parser API
 │   ├── font.h              # Font rendering subsystem (glyph atlas + Nerd Fonts)
 │   ├── input.h             # Keyboard input → PTY sequence converter
+│   ├── mouse.h             # Mouse tracking → PTY report encoder
 │   ├── scrollback.h        # Scrollback ring buffer
 │   └── screen.h            # Screen cell with SGR colour attributes
 ├── src/
@@ -94,12 +119,14 @@ switch between standard and Nerd Fonts at runtime via the API.
 │   ├── parser.c            # ANSI escape sequence state machine
 │   ├── font.c              # TrueType font loader, glyph atlas, Nerd Fonts PUA
 │   ├── input.c             # Keyboard handling
+│   ├── mouse.c             # Mouse report encoder (X10 + SGR)
 │   ├── scrollback.c        # Line-based ring buffer
 │   ├── screen.c            # Screen grid buffer (per-cell fg/bg colours)
 │   ├── test_parser.c       # 46 unit tests (parser, incl. colon sub-params)
 │   ├── test_scrollback.c   # 18 unit tests (scrollback ring buffer + viewport indexing)
 │   ├── test_screen.c       # 6 unit tests (screen buffer ops)
-│   └── test_ansi_colors.c  # 32 unit tests (SGR colour parsing)
+│   ├── test_ansi_colors.c  # 32 unit tests (SGR colour parsing)
+│   └── test_mouse.c        # 11 unit tests (mouse encoding: X10 + SGR)
 └── .opencode/
     ├── agents/             # Agent definitions
     └── package.json        # opencode configuration
@@ -189,6 +216,9 @@ switch between standard and Nerd Fonts at runtime via the API.
   - Attributes: 0 (reset), 1 (bold), 4 (underline), 22/24 (off)
 - **ESC sequences**: IND, RI, NEL, DECSC, DECRC, RIS
 - Keyboard input via `input.c` with modifier support (Ctrl, Alt, Shift)
+- **Mouse reporting** via `mouse.c`: DECSET modes `?9`/`?1000`/`?1002`/`?1003`
+  and SGR encoding `?1006`; button, motion and wheel events with modifier
+  bits; wheel drives local scrollback when tracking is off
 - Cursor drawn as inverted block
 - Window resizing with PTY resize notification
 - Non-blocking PTY I/O
@@ -208,6 +238,6 @@ switch between standard and Nerd Fonts at runtime via the API.
 - [x] SGR colour attributes (standard/bright/extended foreground, background, bold, underline)
 - [x] 256-colour palette and 24-bit truecolor RGB support
 - [x] Scrollback buffer integration with viewport scrolling
-- [ ] Mouse support
+- [x] Mouse support
 - [ ] Clipboard integration
 - [ ] Configuration file
