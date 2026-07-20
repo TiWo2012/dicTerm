@@ -373,6 +373,7 @@ documented with Doxygen comments.
 - [x] Multi-font fallback (regular → nerd → symbols → `?`)
 - [x] UTF-8 decoder for multi-byte Unicode codepoints
 - [x] Configuration file
-- [ ] Mouse support
+- [x] Mouse support
+- [x] Clipboard integration (copy/paste, selection, OSC 52, bracketed paste)
 - [ ] Clipboard integration
 - [ ] Font ligature support
