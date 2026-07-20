@@ -1031,6 +1031,13 @@ int main(void) {
   if (fcntl(master_fd, F_SETFL, fl | O_NONBLOCK) == -1)
     perror("fcntl F_SETFL");
 
+#if defined(GLFW_PLATFORM)
+  {
+    const char *dpy = getenv("DISPLAY");
+    if (dpy && dpy[0])
+      glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+  }
+#endif
   if (!glfwInit()) {
     fprintf(stderr, "dicTerm: glfwInit failed.\n");
     close(master_fd);
@@ -1042,7 +1049,16 @@ int main(void) {
   glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
   GLFWwindow *window = glfwCreateWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm", NULL, NULL);
   if (!window) {
+    const char *desc = NULL;
+    glfwGetError(&desc);
     fprintf(stderr, "dicTerm: glfwCreateWindow failed.\n");
+    if (desc) fprintf(stderr, "  GLFW error: %s\n", desc);
+    const char *wl = getenv("WAYLAND_DISPLAY");
+    const char *x11 = getenv("DISPLAY");
+    fprintf(stderr, "  Platform: WAYLAND_DISPLAY=%s  DISPLAY=%s\n",
+            wl ? wl : "(unset)", x11 ? x11 : "(unset)");
+    if (wl && wl[0] && (!x11 || !x11[0]))
+      fprintf(stderr, "  Tip: restart waypipe with --xwls, then set DISPLAY=:0\n");
     glfwTerminate(); close(master_fd); return 1;
   }
   glfwMakeContextCurrent(window);
