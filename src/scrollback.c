@@ -89,15 +89,18 @@ void scrollback_destroy(scrollback_t *sb) {
  * @param line Array of cols codepoints to store.
  */
 void scrollback_push(scrollback_t *sb, const int *line) {
-  if (!sb || !line)
+  if (!sb || !line || !sb->buffer)
     return;
 
+  size_t valid_cols = (size_t)sb->cols;
+  if (valid_cols == 0) return;
+ 
   // Copy the line into the current head position.
-  memcpy(sb->buffer + (size_t)sb->head * (size_t)sb->cols, line,
-         (size_t)sb->cols * sizeof(int));
+  memcpy(sb->buffer + (size_t)sb->head * valid_cols, line,
+         valid_cols * sizeof(int));
 
   sb->head = (sb->head + 1) % sb->capacity;
-  if (sb->count < sb->capacity)
+  if ((int)sb->count < sb->capacity)
     sb->count++;
   sb->total++;
 }

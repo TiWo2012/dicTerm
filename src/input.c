@@ -10,6 +10,7 @@
 #include "input.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -394,4 +395,483 @@ int process_keyboard_input(int fd) {
   char_queue_count = 0;
   key_queue_count = 0;
   return total_written;
+}
+
+// ===========================================================================
+// Mouse input handling
+// ===========================================================================
+
+/**
+ * @file input.c (mouse section)
+ * @brief Mouse input implementation.
+ *
+ * Converts GLFW mouse events into terminal escape sequences using the
+ * active mouse tracking protocol (X10, VT200, SGR, urxvt, SGR pixels).
+ * Handles button press/release, motion (when dragging), and wheel events.
+ */
+
+#define MOUSE_EVENT_QUEUE 256
+
+/** @brief Internal mouse event queue entry. */
+typedef struct {
+  int   type;      /**< 0=button, 1=motion, 2=scroll, 3=leave. */
+  int   button;    /**< GLFW_MOUSE_BUTTON_1/2/3 etc. */
+  int   action;    /**< GLFW_PRESS / GLFW_RELEASE. */
+  int   mods;      /**< GLFW_MOD_* flags at time of event. */
+  double x, y;     /**< Window-relative cursor position (pixels). */
+  double sx, sy;   /**< Scroll offsets. */
+} mouse_qevent_t;
+
+// --- Static state -----------------------------------------------------------
+
+static GLFWwindow        *mouse_window;
+static mouse_tracking_t   mouse_tracking = MOUSE_TRACK_OFF;
+static mouse_encoding_t   mouse_encoding = MOUSE_ENC_DEFAULT;
+static int                mouse_term_cols  = 80;
+static int                mouse_term_rows  = 24;
+static double             mouse_char_w     = 10.0;
+static double             mouse_char_h     = 20.0;
+static int                mouse_padding    = 10;
+
+static mouse_qevent_t     mouse_queue[MOUSE_EVENT_QUEUE];
+static int                mouse_qcount;
+
+// Track button state for motion events.
+static bool mouse_btn_state[3];   /**< Indexed by button (0=left, 1=right, 2=middle). */
+static int  mouse_last_btn = -1;  /**< Most recently pressed button. */
+
+/** @brief Write a string literal directly to fd (no trailing NUL written). */
+static int mouse_write_str(int fd, const char *s) {
+  size_t len = strlen(s);
+  return write_all(fd, (const uint8_t *)s, (int)len);
+}
+
+/**
+ * @brief Determine whether SGR-style encoding (with '<' prefix and 'M'/'m' final)
+ *        should be used for the current encoding mode.
+ */
+static bool mouse_enc_is_sgr_style(void) {
+  return mouse_encoding == MOUSE_ENC_SGR || mouse_encoding == MOUSE_ENC_SGR_PIX;
+}
+
+/**
+ * @brief Determine whether coordinates are encoded in the old +32 offset style.
+ */
+static bool mouse_enc_is_offset(void) {
+  return mouse_encoding == MOUSE_ENC_DEFAULT;
+}
+
+// ---------------------------------------------------------------------------
+// Coordinate conversion
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Convert window pixel coordinates to 1-based terminal cell coords.
+ *
+ * Returns false if the position is outside the terminal grid.
+ */
+static bool pixel_to_cell(double px, double py, int *col, int *row) {
+  double cx = (px - mouse_padding) / mouse_char_w;
+  double cy = (py - mouse_padding) / mouse_char_h;
+  if (cx < 0.0) cx = 0.0;
+  if (cy < 0.0) cy = 0.0;
+  int c = (int)cx;
+  int r = (int)cy;
+  if (c >= mouse_term_cols) c = mouse_term_cols - 1;
+  if (r >= mouse_term_rows) r = mouse_term_rows - 1;
+  if (c < 0 || r < 0) return false;
+  *col = c + 1; // 1-based
+  *row = r + 1;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Button code encoding
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Compute the button code for a mouse event.
+ *
+ * Encoding (cb):
+ *   0 = left, 1 = middle, 2 = right, 3 = release
+ *   +4 = shift, +8 = meta/alt, +16 = ctrl, +32 = motion
+ *   +64 = scroll up, +65 = scroll down
+ */
+static int encode_button(int glfw_btn, int action, int mods, bool is_motion) {
+  int cb;
+  if (glfw_btn == GLFW_MOUSE_BUTTON_LEFT)   cb = 0;
+  else if (glfw_btn == GLFW_MOUSE_BUTTON_MIDDLE) cb = 1;
+  else if (glfw_btn == GLFW_MOUSE_BUTTON_RIGHT)  cb = 2;
+  else cb = 0;
+
+  if (action == GLFW_RELEASE) {
+    cb = 3; // release code
+  }
+
+  // Motion flag
+  if (is_motion) cb |= 32;
+
+  // Modifier flags
+  if (mods & GLFW_MOD_SHIFT)   cb |= 4;
+  if (mods & GLFW_MOD_ALT)     cb |= 8;
+  if (mods & GLFW_MOD_CONTROL) cb |= 16;
+
+  return cb;
+}
+
+// ---------------------------------------------------------------------------
+// GLFW callbacks
+// ---------------------------------------------------------------------------
+
+static void mouse_button_callback(GLFWwindow *window, int button, int action, int mods) {
+  (void)window;
+  if (mouse_qcount >= MOUSE_EVENT_QUEUE) return;
+
+  // Only handle left, right, middle
+  int idx = -1;
+  if (button == GLFW_MOUSE_BUTTON_LEFT)   idx = 0;
+  else if (button == GLFW_MOUSE_BUTTON_RIGHT)  idx = 1;
+  else if (button == GLFW_MOUSE_BUTTON_MIDDLE) idx = 2;
+  else return;
+
+  double x, y;
+  glfwGetCursorPos(window, &x, &y);
+
+  mouse_qevent_t *ev = &mouse_queue[mouse_qcount++];
+  ev->type   = 0; // button
+  ev->button = button;
+  ev->action = action;
+  ev->mods   = mods;
+  ev->x      = x;
+  ev->y      = y;
+  ev->sx     = 0;
+  ev->sy     = 0;
+
+  mouse_btn_state[idx] = (action == GLFW_PRESS);
+  if (action == GLFW_PRESS) mouse_last_btn = button;
+}
+
+static void mouse_move_callback(GLFWwindow *window, double x, double y) {
+  (void)window;
+  if (mouse_qcount >= MOUSE_EVENT_QUEUE) return;
+
+  mouse_qevent_t *ev = &mouse_queue[mouse_qcount++];
+  ev->type   = 1; // motion
+  ev->button = -1;
+  ev->action = -1;
+  ev->mods   = 0;
+  ev->x      = x;
+  ev->y      = y;
+  ev->sx     = 0;
+  ev->sy     = 0;
+}
+
+static void mouse_scroll_callback(GLFWwindow *window, double xoffset, double yoffset) {
+  (void)window; (void)xoffset;
+  if (mouse_qcount >= MOUSE_EVENT_QUEUE) return;
+
+  mouse_qevent_t *ev = &mouse_queue[mouse_qcount++];
+  ev->type   = 2; // scroll
+  ev->button = -1;
+  ev->action = -1;
+  ev->mods   = 0;
+  ev->x      = 0;
+  ev->y      = 0;
+  ev->sx     = 0;
+  ev->sy     = yoffset;
+}
+
+static void mouse_enter_callback(GLFWwindow *window, int entered) {
+  (void)window;
+  if (mouse_qcount >= MOUSE_EVENT_QUEUE) return;
+
+  mouse_qevent_t *ev = &mouse_queue[mouse_qcount++];
+  ev->type   = 3; // leave
+  ev->button = -1;
+  ev->action = entered;
+  ev->mods   = 0;
+  ev->x      = 0;
+  ev->y      = 0;
+  ev->sx     = 0;
+  ev->sy     = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Sequence builders
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Maximum buffer size for a mouse escape sequence.
+ *
+ * Largest: SGR pixel mode
+ *   ESC[<255;65535;65535M  (24 bytes)  plus NUL.
+ */
+#define MOUSE_SEQ_MAX 64
+
+/**
+ * @brief Build a mouse event escape sequence.
+ *
+ * @param out        Output buffer (MOUSE_SEQ_MAX bytes, NUL-terminated).
+ * @param cb         Button code (encoded, with modifiers already OR'd in).
+ * @param col        1-based terminal column.
+ * @param row        1-based terminal row.
+ * @param is_release true if this is a button release.
+ * @param is_motion  true if this is a motion event.
+ * @return           Number of bytes written to out (excluding NUL).
+ */
+static int build_mouse_seq(char out[MOUSE_SEQ_MAX], int cb,
+                           int col, int row, bool is_release, bool is_motion) {
+  out[0] = '\0';
+
+  int n_col = col;
+  int n_row = row;
+
+  if (is_motion) {
+    cb |= 32; // motion flag
+  }
+
+  if (mouse_enc_is_offset()) {
+    // Offset encoding (old style): coordinates are 1-based, encoded as +32
+    // Range 1-223 only.
+    if (n_col > 223) n_col = 223;
+    if (n_row > 223) n_row = 223;
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[M%c%c%c",
+                       (char)(cb + 32), (char)(n_col + 32), (char)(n_row + 32));
+    return (len > 0) ? len : 0;
+  }
+
+  if (mouse_enc_is_sgr_style() || mouse_encoding == MOUSE_ENC_SGR_PIX) {
+    // SGR or SGR-pixel encoding: ESC [ < cb ; col ; row M/m
+    if (mouse_encoding == MOUSE_ENC_SGR_PIX) {
+      // SGR pixels: use pixel coordinates
+      int px = (int)((double)(col - 1) * mouse_char_w + mouse_char_w / 2.0);
+      int py = (int)((double)(row - 1) * mouse_char_h + mouse_char_h / 2.0);
+      if (is_release) {
+        int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dm", cb, px, py);
+        return (len > 0) ? len : 0;
+      } else {
+        int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dM", cb, px, py);
+        return (len > 0) ? len : 0;
+      }
+    } else {
+      if (is_release) {
+        int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dm", cb, n_col, n_row);
+        return (len > 0) ? len : 0;
+      } else {
+        int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dM", cb, n_col, n_row);
+        return (len > 0) ? len : 0;
+      }
+    }
+  }
+
+  if (mouse_encoding == MOUSE_ENC_URXVT) {
+    // urxvt: ESC [ cb ; col ; row M
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[%d;%d;%dM", cb, n_col, n_row);
+    return (len > 0) ? len : 0;
+  }
+
+  return 0;
+}
+
+/**
+ * @brief Build a scroll wheel escape sequence.
+ */
+static int build_scroll_seq(char out[MOUSE_SEQ_MAX], double yoffset,
+                            int col, int row, int mods) {
+  out[0] = '\0';
+
+  // Scroll button codes:
+  //   yoffset > 0 = scroll up  (cb = 64, button 4)
+  //   yoffset < 0 = scroll down (cb = 65, button 5)
+  int cb = (yoffset > 0) ? 64 : 65;
+
+  // Modifier flags
+  if (mods & GLFW_MOD_SHIFT)   cb |= 4;
+  if (mods & GLFW_MOD_ALT)     cb |= 8;
+  if (mods & GLFW_MOD_CONTROL) cb |= 16;
+
+  int n_col = col;
+  int n_row = row;
+
+  if (mouse_enc_is_offset()) {
+    if (n_col > 223) n_col = 223;
+    if (n_row > 223) n_row = 223;
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[M%c%c%c",
+                       (char)(cb + 32), (char)(n_col + 32), (char)(n_row + 32));
+    return (len > 0) ? len : 0;
+  }
+
+  if (mouse_encoding == MOUSE_ENC_SGR) {
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dM", cb, n_col, n_row);
+    return (len > 0) ? len : 0;
+  }
+
+  if (mouse_encoding == MOUSE_ENC_SGR_PIX) {
+    int px = (int)((double)(col - 1) * mouse_char_w + mouse_char_w / 2.0);
+    int py = (int)((double)(row - 1) * mouse_char_h + mouse_char_h / 2.0);
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[<%d;%d;%dM", cb, px, py);
+    return (len > 0) ? len : 0;
+  }
+
+  if (mouse_encoding == MOUSE_ENC_URXVT) {
+    int len = snprintf(out, MOUSE_SEQ_MAX, "\x1B[%d;%d;%dM", cb, n_col, n_row);
+    return (len > 0) ? len : 0;
+  }
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void mouse_init(GLFWwindow *window,
+                int term_cols, int term_rows,
+                int win_padding, float char_w, float char_h) {
+  mouse_window      = window;
+  mouse_tracking    = MOUSE_TRACK_OFF;
+  mouse_encoding    = MOUSE_ENC_DEFAULT;
+  mouse_term_cols   = term_cols;
+  mouse_term_rows   = term_rows;
+  mouse_padding     = win_padding;
+  mouse_char_w      = (double)char_w;
+  mouse_char_h      = (double)char_h;
+  mouse_qcount      = 0;
+  mouse_last_btn    = -1;
+
+  for (int i = 0; i < 3; i++)
+    mouse_btn_state[i] = false;
+
+  // Install GLFW callbacks
+  glfwSetMouseButtonCallback(window, mouse_button_callback);
+  glfwSetCursorPosCallback(window, mouse_move_callback);
+  glfwSetScrollCallback(window, mouse_scroll_callback);
+  glfwSetCursorEnterCallback(window, mouse_enter_callback);
+}
+
+void mouse_update_geometry(int term_cols, int term_rows,
+                           int win_padding, float char_w, float char_h) {
+  mouse_term_cols = term_cols;
+  mouse_term_rows = term_rows;
+  mouse_padding   = win_padding;
+  mouse_char_w    = (double)char_w;
+  mouse_char_h    = (double)char_h;
+}
+
+bool mouse_set_tracking(mouse_tracking_t tracking) {
+  bool changed = (mouse_tracking != tracking);
+  mouse_tracking = tracking;
+  return changed;
+}
+
+void mouse_set_encoding(mouse_encoding_t encoding) {
+  mouse_encoding = encoding;
+}
+
+/**
+ * @brief Process all queued mouse events and write sequences to the PTY.
+ *
+ * Handles button press/release, motion (with drag tracking), wheel events,
+ * and focus enter/leave.  Respects the active mouse tracking mode.
+ *
+ * @param fd  PTY master file descriptor.
+ * @return    Total bytes written, or -1 on write error.
+ */
+int process_mouse_input(int fd) {
+  if (mouse_tracking == MOUSE_TRACK_OFF)
+    return 0;
+
+  int total = 0;
+  char seq[MOUSE_SEQ_MAX];
+
+  for (int i = 0; i < mouse_qcount; i++) {
+    mouse_qevent_t *ev = &mouse_queue[i];
+
+    int col = 1, row = 1;
+    bool pos_valid = false;
+
+    switch (ev->type) {
+    case 0: { // Button event
+      pos_valid = pixel_to_cell(ev->x, ev->y, &col, &row);
+      if (!pos_valid) break;
+
+      bool is_release = (ev->action == GLFW_RELEASE);
+      int cb = encode_button(ev->button, ev->action, ev->mods, false);
+      int len = build_mouse_seq(seq, cb, col, row, is_release, false);
+      if (len > 0) {
+        if (mouse_write_str(fd, seq) < 0) return -1;
+        total += len;
+      }
+      break;
+    }
+
+    case 1: { // Motion event
+      pos_valid = pixel_to_cell(ev->x, ev->y, &col, &row);
+      if (!pos_valid) break;
+
+      bool any_btn = mouse_btn_state[0] || mouse_btn_state[1] || mouse_btn_state[2];
+      int active_btn = -1;
+
+      if (mouse_btn_state[0]) active_btn = GLFW_MOUSE_BUTTON_LEFT;
+      else if (mouse_btn_state[2]) active_btn = GLFW_MOUSE_BUTTON_RIGHT;
+      else if (mouse_btn_state[1]) active_btn = GLFW_MOUSE_BUTTON_MIDDLE;
+
+      if (any_btn && active_btn >= 0 &&
+          mouse_tracking >= MOUSE_TRACK_BTN) {
+        // Button event tracking (?1002) or any-event (?1003):
+        // Forward motion while dragging.
+        int cb = encode_button(active_btn, GLFW_PRESS, 0, true);
+        int len = build_mouse_seq(seq, cb, col, row, false, true);
+        if (len > 0) {
+          if (mouse_write_str(fd, seq) < 0) return -1;
+          total += len;
+        }
+      } else if (!any_btn && mouse_tracking == MOUSE_TRACK_ANY) {
+        // Any-event mode (?1003): forward all motion, even without button.
+        int len = build_mouse_seq(seq, 0, col, row, false, true);
+        if (len > 0) {
+          if (mouse_write_str(fd, seq) < 0) return -1;
+          total += len;
+        }
+      }
+      break;
+    }
+
+    case 2: { // Scroll event
+      // Use current cursor position if available
+      double cx, cy;
+      glfwGetCursorPos(mouse_window, &cx, &cy);
+      pixel_to_cell(cx, cy, &col, &row);
+
+      int len = build_scroll_seq(seq, ev->sy, col, row, 0);
+      if (len > 0) {
+        if (mouse_write_str(fd, seq) < 0) return -1;
+        total += len;
+      }
+      break;
+    }
+
+    case 3: // Focus enter/leave (not typically reported)
+    default:
+      break;
+    }
+  }
+
+  mouse_qcount = 0;
+  return total;
+}
+
+bool mouse_is_enabled(void) {
+  return mouse_tracking != MOUSE_TRACK_OFF;
+}
+
+double mouse_consume_scroll(void) {
+  double total = 0.0;
+  for (int i = 0; i < mouse_qcount; i++) {
+    if (mouse_queue[i].type == 2) {
+      total += mouse_queue[i].sy;
+    }
+  }
+  mouse_qcount = 0;
+  return total;
 }

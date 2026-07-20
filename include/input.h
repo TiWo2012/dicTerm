@@ -1,8 +1,8 @@
 /**
  * @file input.h
- * @brief GLFW keyboard input to terminal byte sequence converter.
+ * @brief GLFW keyboard and mouse input to terminal byte sequence converter.
  *
- * Polls raylib for all pending key events each frame and writes the
+ * Polls GLFW for all pending key/mouse events each frame and writes the
  * corresponding terminal escape sequences to the given file descriptor
  * (typically the master end of a PTY).
  */
@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <GLFW/glfw3.h>
+#include "config.h"
 
 #define KEY_A GLFW_KEY_A
 #define KEY_B GLFW_KEY_B
@@ -94,6 +95,10 @@
  */
 #define INPUT_MAX_SEQ 16
 
+// ---------------------------------------------------------------------------
+// Keyboard API
+// ---------------------------------------------------------------------------
+
 /**
  * Convert a single raylib key + modifier state into a terminal byte
  * sequence.
@@ -121,5 +126,83 @@ int process_keyboard_input(int fd);
 void input_init(GLFWwindow *window);
 bool input_key_pressed(int key);
 bool input_key_down(int key);
+
+// ---------------------------------------------------------------------------
+// Mouse API
+// ---------------------------------------------------------------------------
+
+/** @brief Mouse tracking mode (DECSET ?9, ?1000, ?1002, ?1003). */
+typedef enum {
+  MOUSE_TRACK_OFF    = 0,
+  MOUSE_TRACK_X10    = 1,
+  MOUSE_TRACK_VT200  = 2,
+  MOUSE_TRACK_BTN    = 3,
+  MOUSE_TRACK_ANY    = 4,
+} mouse_tracking_t;
+
+/** @brief Mouse coordinate encoding (DECSET ?1006, ?1015, ?1016). */
+typedef enum {
+  MOUSE_ENC_DEFAULT  = 0,
+  MOUSE_ENC_SGR      = 1,
+  MOUSE_ENC_URXVT    = 2,
+  MOUSE_ENC_SGR_PIX  = 3,
+} mouse_encoding_t;
+
+/**
+ * Initialize mouse input handling.  Installs GLFW callbacks for mouse
+ * button, cursor position, and scroll events.  Must be called after
+ * input_init() and before the main loop.
+ *
+ * @param window      GLFW window handle.
+ * @param term_cols   Terminal width in cells.
+ * @param term_rows   Terminal height in cells.
+ * @param win_padding Window padding in pixels (terminal area inset).
+ * @param char_w      Character cell width in pixels.
+ * @param char_h      Character cell height in pixels.
+ */
+void mouse_init(GLFWwindow *window,
+                int term_cols, int term_rows,
+                int win_padding, float char_w, float char_h);
+
+/**
+ * Update terminal geometry (called on window resize).
+ */
+void mouse_update_geometry(int term_cols, int term_rows,
+                           int win_padding, float char_w, float char_h);
+
+/**
+ * Set the mouse tracking mode.
+ * Reports whether the mode actually changed.
+ */
+bool mouse_set_tracking(mouse_tracking_t tracking);
+
+/**
+ * Set the mouse encoding mode.
+ */
+void mouse_set_encoding(mouse_encoding_t encoding);
+
+/**
+ * Process all queued mouse events and write corresponding escape
+ * sequences to the PTY.  Call once per frame in the main loop.
+ *
+ * @param fd  PTY master file descriptor.
+ * @return    Total bytes written, or -1 on write error.
+ */
+int process_mouse_input(int fd);
+
+/**
+ * Check if mouse tracking is currently enabled.
+ */
+bool mouse_is_enabled(void);
+
+/**
+ * Consume scroll events from the mouse queue and return the net
+ * vertical scroll delta.  Used for scrollback scrolling when mouse
+ * tracking is disabled.  Also drains any button/motion events so
+ * the queue doesn't accumulate.
+ *
+ * @return Net vertical scroll delta (positive = scroll up, negative = down).
+ */
+double mouse_consume_scroll(void);
 
 #endif // INPUT_H

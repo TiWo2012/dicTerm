@@ -1313,26 +1313,6 @@ int main(void) {
         }
       }
 
-      #if 0
-      // Scrollback indicator bar at the bottom
-      {
-        int indicator_y = WIN_PADDING + screen_rows * (int)char_h;
-        if (indicator_y + 2 < term.win_height) {
-          // Semi-transparent bar
-          DrawRectangle(0, indicator_y, term.win_width, 20,
-                        (Color){ 30, 40, 60, 220 });
-
-          char indicator[64];
-          int len = snprintf(indicator, sizeof(indicator),
-                             " -- Scrollback (%d/%d) --",
-                             term.scroll_offset, sb_count);
-          // Simple bitmap-font rendering using DrawText (raylib default font)
-          DrawText(indicator, WIN_PADDING, indicator_y + 2, 14,
-                   (Color){ 180, 200, 230, 255 });
-          (void)len;
-        }
-      }
-      #endif
     } else {
       // ── Normal terminal mode ────────────────────────────────────
       for (int r = 0; r < term.screen.rows; r++) {
@@ -1355,22 +1335,26 @@ int main(void) {
         }
       }
 
-      #if 0
-      // Cursor: inverted block (only in normal mode)
+      // ── Cursor rendering (active) ─────────────────────────────────
       {
-        float cx = (float)WIN_PADDING + (float)term.cx * char_w;
-        float cy = (float)WIN_PADDING + (float)term.cy * char_h;
-        DrawRectangle((int)cx, (int)cy, (int)char_w, (int)char_h,
-                      (Color){ 220, 220, 220, 180 });
-
+        screen_cell_t cursor_cell;
         int cp = term.screen.cells[term.cy * term.screen.cols + term.cx].ch;
         if (cp < 0x20) cp = ' ';
-        DrawTextCodepoints(*font->current, &cp, 1,
-                           (Vector2){ cx, cy },
-                           font->font_size, font->spacing,
-                           (Color){ 15, 20, 25, 255 });
+        cursor_cell.ch = cp;
+        cursor_cell.fg[0] = 0;   cursor_cell.fg[1] = 0;   cursor_cell.fg[2] = 0;
+        cursor_cell.bg[0] = 255; cursor_cell.bg[1] = 255; cursor_cell.bg[2] = 100;
+        cursor_cell.bold = 0;
+        cursor_cell.italic = 0;
+        cursor_cell.underline = 0;
+        cursor_cell.blink = 0;
+
+        float cx = (float)WIN_PADDING + (float)term.cx * char_w;
+        float cy = (float)WIN_PADDING + (float)term.cy * char_h;
+
+        if (gl_renderer)
+          gl_renderer_draw_cells(gl_renderer, &cursor_cell, 1,
+                                 cx, cy, char_w, char_h);
       }
-      #endif
     }
 
     if (gl_renderer) gl_renderer_end(gl_renderer);
