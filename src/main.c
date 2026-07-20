@@ -19,6 +19,7 @@
 #include "scrollback.h"
 #include "screen.h"
 #include "gl_renderer.h"
+#include "clipboard.h"
 
 // Terminal geometry – computed from window size and font metrics at startup.
 static int WIN_PADDING = 10;
@@ -57,6 +58,19 @@ typedef struct {
 
   int           utf8_codepoint;    /**< Partially accumulated UTF-8 codepoint. */
   int           utf8_remaining;    /**< UTF-8 continuation bytes still expected. */
+
+  // Selection state (mouse-based text selection)
+  struct {
+    bool active;          /**< User is currently dragging to select. */
+    bool has_selection;   /**< A completed selection exists. */
+    int  start_row;       /**< 0-based start row. */
+    int  start_col;       /**< 0-based start column. */
+    int  end_row;         /**< 0-based end row. */
+    int  end_col;         /**< 0-based end column. */
+  } selection;
+
+  /** Bracketed paste mode (DECSET ?2004). */
+  bool bracketed_paste;
 } terminal_t;
 
 // ---------------------------------------------------------------------------
@@ -586,12 +600,26 @@ static void set_bright_bg(terminal_t *t, int idx) {
 static void on_csi(int params[16], int num_params,
                    char intermediates[2], int num_intermediates,
                    char final, void *ctx) {
-  (void)intermediates; (void)num_intermediates;
   terminal_t *t = (terminal_t *)ctx;
   // An escape/CSI sequence breaks any in-progress UTF-8 multi-byte sequence
   utf8_reset(t);
 
 #define PARAM(n) ((n) < num_params && params[(n)] >= 0 ? params[(n)] : -1)
+
+  // ---- DEC private SET/RESET (intermediate '?' → h/l) ----
+  // Handles DECSET (h) and DECRST (l) for modes like:
+  //   ?2004h/l – bracketed paste mode
+  if (num_intermediates > 0 && intermediates[0] == '?') {
+    if (final == 'h' || final == 'l') {
+      bool set = (final == 'h');
+      int p = PARAM(0);
+      if (p == 2004) {
+        t->bracketed_paste = set;
+      }
+      // Future: handle ?25 (cursor vis), ?1000/1002/1003 (mouse tracking)
+    }
+    return; // handled
+  }
 
   switch (final) {
   default:
@@ -812,14 +840,40 @@ static void on_esc(char intermediates[2], int num_intermediates,
   }
 }
 
-/// @brief OSC handler (Operating System Command) – currently a no-op.
+/// @brief OSC handler (Operating System Command).
+///
+/// Handles:
+///   - OSC 52 (clipboard control): ESC ] 52 ; <sel> ; <base64> [ST|BEL]
+///
 /// @param cmd  OSC command number.
 /// @param str  OSC string payload.
-/// @param ctx  Unused.
+/// @param ctx  Pointer to terminal_t.
 static void on_osc(int cmd, const char *str, void *ctx) {
-  (void)cmd; (void)str;
   terminal_t *t = (terminal_t *)ctx;
   utf8_reset(t);
+
+  if (cmd == 52) {
+    // OSC 52: ESC ] 52 ; <selection> ; <base64-data> [ST|BEL]
+    // Parse: "c;BASE64" or "s;BASE64" or "p;BASE64"
+    const char *p = str;
+    if (*p && *(p + 1) == ';') {
+      char sel = *p;
+      p += 2; // skip "X;"
+
+      if (*p) {
+        // Decode base64 and copy to clipboard
+        uint8_t dec[CLIPBOARD_MAX_SIZE];
+        int len = base64_decode(p, dec, sizeof(dec) - 1);
+        dec[len] = '\0';
+        if (len > 0) {
+          clipboard_copy((const char *)dec);
+          // Also set PRIMARY if requested
+          if (sel == 'p' || sel == 's')
+            clipboard_copy_primary((const char *)dec);
+        }
+      }
+    }
+  }
 }
 
 /// @brief DCS handler (Device Control String) – currently a no-op.
@@ -984,6 +1038,272 @@ static void render_cell(font_handle_t *font, const screen_cell_t *cell,
 }
 
 // ---------------------------------------------------------------------------
+// Selection helpers
+// ---------------------------------------------------------------------------
+
+/// @brief Check if a cell at (row, col) is within the selection rectangle.
+static bool is_cell_selected(const terminal_t *t, int row, int col) {
+    if (!t->selection.has_selection && !t->selection.active)
+        return false;
+
+    int r1 = t->selection.start_row;
+    int c1 = t->selection.start_col;
+    int r2 = t->selection.end_row;
+    int c2 = t->selection.end_col;
+
+    // Normalise (swap both row AND column when direction is reversed)
+    if (r1 > r2) {
+        int tmp = r1; r1 = r2; r2 = tmp;
+        tmp = c1; c1 = c2; c2 = tmp;
+    }
+    if (r1 == r2 && c1 > c2) {
+        int tmp = c1; c1 = c2; c2 = tmp;
+    }
+
+    if (row < r1 || row > r2) return false;
+    if (row == r1 && col < c1) return false;
+    if (row == r2 && col > c2) return false;
+    return true;
+}
+
+/// @brief Extract selected text from the screen buffer into a buffer.
+///        Returns the number of bytes written (excluding NUL).
+static int extract_selected_text(terminal_t *t,
+                                  char *buf, size_t buf_size) {
+    if (!t->selection.has_selection || !buf || buf_size == 0)
+        return 0;
+
+    int r1 = t->selection.start_row;
+    int c1 = t->selection.start_col;
+    int r2 = t->selection.end_row;
+    int c2 = t->selection.end_col;
+
+    // Normalise
+    if (r1 > r2) {
+        int tmp = r1; r1 = r2; r2 = tmp;
+        tmp = c1; c1 = c2; c2 = tmp;
+    }
+    if (r1 == r2 && c1 > c2) {
+        int tmp = c1; c1 = c2; c2 = tmp;
+    }
+
+    int pos = 0;
+    for (int r = r1; r <= r2 && pos < (int)buf_size - 1; r++) {
+        int start_c = (r == r1) ? c1 : 0;
+        int end_c   = (r == r2) ? c2 : t->screen.cols - 1;
+
+        for (int c = start_c; c <= end_c && pos < (int)buf_size - 1; c++) {
+            screen_cell_t *cell = screen_buf_cell(
+                &t->screen, r, c);
+            if (!cell) continue;
+            int ch = cell->ch;
+            if (ch < 0x20 && ch != '\t') continue; // skip C0 controls
+
+            // Encode to UTF-8
+            if (ch < 0x80) {
+                buf[pos++] = (char)ch;
+            } else if (ch < 0x800) {
+                if (pos + 2 >= (int)buf_size) break;
+                buf[pos++] = (char)(0xC0 | (ch >> 6));
+                buf[pos++] = (char)(0x80 | (ch & 0x3F));
+            } else if (ch < 0x10000) {
+                if (pos + 3 >= (int)buf_size) break;
+                buf[pos++] = (char)(0xE0 | (ch >> 12));
+                buf[pos++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+                buf[pos++] = (char)(0x80 | (ch & 0x3F));
+            } else if (ch < 0x110000) {
+                if (pos + 4 >= (int)buf_size) break;
+                buf[pos++] = (char)(0xF0 | (ch >> 18));
+                buf[pos++] = (char)(0x80 | ((ch >> 12) & 0x3F));
+                buf[pos++] = (char)(0x80 | ((ch >> 6) & 0x3F));
+                buf[pos++] = (char)(0x80 | (ch & 0x3F));
+            }
+        }
+
+        // Add newline between rows (but not after the last row)
+        if (r < r2 && pos < (int)buf_size - 1) {
+            buf[pos++] = '\n';
+        }
+    }
+
+    buf[pos] = '\0';
+    return pos;
+}
+
+/// @brief Copy selected text to the system clipboard.
+static void copy_selection(terminal_t *t) {
+    char sel_buf[CLIPBOARD_MAX_SIZE];
+    int len = extract_selected_text(t, sel_buf, sizeof(sel_buf));
+    if (len > 0) {
+        clipboard_copy(sel_buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard shortcut handling
+// ---------------------------------------------------------------------------
+
+/// @brief Write all bytes to a fd, retrying on partial writes (forward decl).
+static int write_all(int fd, const void *buf, size_t len);
+
+/** @brief Result of clipboard shortcut processing. */
+typedef enum {
+    CLIP_ACTION_NONE,         /**< No clipboard action. */
+    CLIP_ACTION_COPY,         /**< Selection was copied. */
+    CLIP_ACTION_PASTE,        /**< Clipboard was pasted to PTY. */
+    CLIP_ACTION_PASTE_PRIMARY,/**< PRIMARY selection was pasted to PTY. */
+} clip_action_t;
+
+/**
+ * @brief Check for clipboard-related keyboard shortcuts.
+ *
+ * Intercepts Ctrl+Shift+C (copy), Ctrl+Shift+V (paste), and
+ * Shift+Insert (paste primary) before they reach the PTY.
+ *
+ * @param t         Terminal state.
+ * @param master_fd PTY master file descriptor for paste writes.
+ * @return          The action that was performed (or CLIP_ACTION_NONE).
+ */
+static clip_action_t handle_clipboard_shortcuts(terminal_t *t, int master_fd) {
+    bool ctrl  = input_key_down(KEY_LEFT_CONTROL) || input_key_down(KEY_RIGHT_CONTROL);
+    bool shift = input_key_down(KEY_LEFT_SHIFT)   || input_key_down(KEY_RIGHT_SHIFT);
+    bool alt   = input_key_down(KEY_LEFT_ALT)     || input_key_down(KEY_RIGHT_ALT);
+
+    // Ctrl+Shift+C — copy selection to clipboard
+    if (ctrl && shift && !alt && input_key_pressed(KEY_C)) {
+        input_consume_key(KEY_C);
+        copy_selection(t);
+        return CLIP_ACTION_COPY;
+    }
+
+    // Ctrl+Shift+V — paste from clipboard
+    if (ctrl && shift && !alt && input_key_pressed(KEY_V)) {
+        input_consume_key(KEY_V);
+        const char *text = clipboard_paste();
+        if (text && text[0]) {
+            if (t->bracketed_paste) {
+                write_all(master_fd, "\x1B[200~", 6);
+                write_all(master_fd, text, strlen(text));
+                write_all(master_fd, "\x1B[201~", 6);
+            } else {
+                write_all(master_fd, text, strlen(text));
+            }
+        }
+        return CLIP_ACTION_PASTE;
+    }
+
+    // Shift+Insert — paste from PRIMARY selection
+    if (shift && !ctrl && !alt && input_key_pressed(KEY_INSERT)) {
+        input_consume_key(KEY_INSERT);
+        const char *text = clipboard_paste_primary();
+        if (!text || !text[0])
+            text = clipboard_paste(); // fallback to CLIPBOARD
+        if (text && text[0]) {
+            if (t->bracketed_paste) {
+                write_all(master_fd, "\x1B[200~", 6);
+                write_all(master_fd, text, strlen(text));
+                write_all(master_fd, "\x1B[201~", 6);
+            } else {
+                write_all(master_fd, text, strlen(text));
+            }
+        }
+        return CLIP_ACTION_PASTE_PRIMARY;
+    }
+
+    return CLIP_ACTION_NONE;
+}
+
+/**
+ * @brief Write all bytes to a file descriptor, retrying on partial writes.
+ * @return Number of bytes written, or -1 on error.
+ */
+static int write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t total = 0;
+    while (total < len) {
+        ssize_t r = write(fd, p + total, len - total);
+        if (r > 0) {
+            total += (size_t)r;
+        } else if (r == 0) {
+            return -1;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return -1;
+        }
+    }
+    return (int)total;
+}
+
+/// @brief Handle middle-click paste from PRIMARY selection.
+static void handle_middle_click_paste(terminal_t *t, int master_fd) {
+    const char *text = clipboard_paste_primary();
+    if (!text || !text[0]) return;
+    if (t->bracketed_paste) {
+        write_all(master_fd, "\x1B[200~", 6);
+        write_all(master_fd, text, strlen(text));
+        write_all(master_fd, "\x1B[201~", 6);
+    } else {
+        write_all(master_fd, text, strlen(text));
+    }
+}
+
+/// @brief Handle mouse-based text selection (when mouse tracking is OFF).
+static void handle_mouse_selection(terminal_t *t, GLFWwindow *window,
+                                    int master_fd,
+                                    float char_w, float char_h) {
+    double mx, my;
+    glfwGetCursorPos(window, &mx, &my);
+
+    // Convert to cell coordinates
+    int col = (int)((mx - (double)WIN_PADDING) / (double)char_w);
+    int row = (int)((my - (double)WIN_PADDING) / (double)char_h);
+    if (col < 0) col = 0;
+    if (row < 0) row = 0;
+    if (col >= t->screen.cols) col = t->screen.cols - 1;
+    if (row >= t->screen.rows) row = t->screen.rows - 1;
+
+    int left_btn   = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
+    int middle_btn = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE);
+    static int prev_left   = GLFW_RELEASE;
+    static int prev_middle = GLFW_RELEASE;
+
+    // Middle-click paste
+    if (prev_middle == GLFW_PRESS && middle_btn == GLFW_RELEASE) {
+        handle_middle_click_paste(t, master_fd);
+        t->selection.has_selection = false;
+        t->selection.active = false;
+    }
+
+    // Left button state change
+    if (prev_left == GLFW_PRESS && left_btn == GLFW_RELEASE) {
+        // Released — finalize selection
+        if (t->selection.active) {
+            t->selection.end_row = row;
+            t->selection.end_col = col;
+            t->selection.active = false;
+            t->selection.has_selection =
+                (t->selection.start_row != t->selection.end_row ||
+                 t->selection.start_col != t->selection.end_col);
+        }
+    } else if (prev_left == GLFW_RELEASE && left_btn == GLFW_PRESS) {
+        // Pressed — start new selection
+        t->selection.start_row = row;
+        t->selection.start_col = col;
+        t->selection.end_row = row;
+        t->selection.end_col = col;
+        t->selection.active = true;
+        t->selection.has_selection = false;
+    } else if (left_btn == GLFW_PRESS && t->selection.active) {
+        // Dragging — extend selection
+        t->selection.end_row = row;
+        t->selection.end_col = col;
+    }
+
+    prev_left   = left_btn;
+    prev_middle = middle_btn;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1064,6 +1384,7 @@ int main(void) {
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
   input_init(window);
+  clipboard_init(window);
 
   // Font subsystem
   font_handle_t *font = font_init(
@@ -1219,8 +1540,24 @@ int main(void) {
     // which does not consume events from GetKeyPressed().
     handle_scrollback_keys(&term);
 
-    // Keyboard input → PTY
+    // Handle clipboard shortcuts (Ctrl+Shift+C, Ctrl+Shift+V, Shift+Insert).
+    // Must run BEFORE process_keyboard_input so we can consume these keys.
+    clip_action_t clip_action = handle_clipboard_shortcuts(&term, master_fd);
+
+    // Keyboard input → PTY (clipboard keys are consumed and won't be forwarded)
     int written = process_keyboard_input(master_fd);
+
+    // Clear selection on paste (content was written to PTY)
+    if (clip_action == CLIP_ACTION_PASTE ||
+        clip_action == CLIP_ACTION_PASTE_PRIMARY) {
+      term.selection.has_selection = false;
+    }
+
+    // Clear selection on any regular (non-clipboard) keyboard input
+    if (written > 0 && clip_action == CLIP_ACTION_NONE) {
+      term.selection.has_selection = false;
+      term.selection.active = false;
+    }
 
     // If any regular key was sent to the PTY while in scrollback mode,
     // exit scrollback mode (return to normal terminal view).
@@ -1240,6 +1577,11 @@ int main(void) {
       if (new_rows < 1) new_rows = 1;
       pty_resize(master_fd, new_cols, new_rows);
       screen_buf_resize(&term.screen, new_rows, new_cols);
+    }
+
+    // Mouse-based text selection (only when mouse tracking is OFF)
+    if (!mouse_is_enabled()) {
+      handle_mouse_selection(&term, window, master_fd, char_w, char_h);
     }
 
     // Parser stuck detection
@@ -1331,23 +1673,55 @@ int main(void) {
 
     } else {
       // ── Normal terminal mode ────────────────────────────────────
+      bool has_sel = term.selection.has_selection || term.selection.active;
+
       for (int r = 0; r < term.screen.rows; r++) {
         float y = (float)WIN_PADDING + (float)r * char_h;
-        for (int c = 0; c < term.screen.cols; c++) {
-          const screen_cell_t *cell =
-            &term.screen.cells[r * term.screen.cols + c];
-          float x = (float)WIN_PADDING + (float)c * char_w;
-          render_cell(term.font, cell, x, y, char_w, char_h);
-        }
-      }
 
-      if (gl_renderer) {
-        for (int r = 0; r < term.screen.rows; r++) {
-          gl_renderer_draw_cells(gl_renderer,
-                                 &term.screen.cells[r * term.screen.cols],
-                                 term.screen.cols, (float)WIN_PADDING,
-                                 (float)WIN_PADDING + (float)r * char_h,
-                                 char_w, char_h);
+        if (has_sel) {
+          // Copy the row and swap fg/bg for selected cells
+          screen_cell_t *row_cells = NULL;
+          // Stack-allocate a small buffer if cols is small, else malloc
+          screen_cell_t stack_buf[256];
+          bool use_stack = term.screen.cols <= 256;
+          if (use_stack) {
+            row_cells = stack_buf;
+          } else {
+            row_cells = malloc((size_t)term.screen.cols * sizeof(screen_cell_t));
+            if (!row_cells) continue;
+          }
+
+          memcpy(row_cells,
+                 &term.screen.cells[(size_t)r * (size_t)term.screen.cols],
+                 (size_t)term.screen.cols * sizeof(screen_cell_t));
+
+          for (int c = 0; c < term.screen.cols; c++) {
+            if (is_cell_selected(&term, r, c)) {
+              // Swap fg and bg for selection highlight
+              uint8_t tmp_fg[3] = { row_cells[c].fg[0],
+                                    row_cells[c].fg[1],
+                                    row_cells[c].fg[2] };
+              row_cells[c].fg[0] = row_cells[c].bg[0];
+              row_cells[c].fg[1] = row_cells[c].bg[1];
+              row_cells[c].fg[2] = row_cells[c].bg[2];
+              row_cells[c].bg[0] = tmp_fg[0];
+              row_cells[c].bg[1] = tmp_fg[1];
+              row_cells[c].bg[2] = tmp_fg[2];
+            }
+          }
+
+          if (gl_renderer)
+            gl_renderer_draw_cells(gl_renderer, row_cells,
+                                   term.screen.cols,
+                                   (float)WIN_PADDING, y, char_w, char_h);
+
+          if (!use_stack) free(row_cells);
+        } else {
+          if (gl_renderer)
+            gl_renderer_draw_cells(gl_renderer,
+                                   &term.screen.cells[r * term.screen.cols],
+                                   term.screen.cols,
+                                   (float)WIN_PADDING, y, char_w, char_h);
         }
       }
 

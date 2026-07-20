@@ -114,7 +114,15 @@ int key_to_seq(int raylib_key, bool shift, bool ctrl, bool alt,
                uint8_t out[INPUT_MAX_SEQ]);
 
 /**
- * Poll raylib for all queued key presses (GetKeyPressed) and write the
+ * @brief Remove a key from the pending input queue so it won't be forwarded
+ *        to the PTY.  Used to intercept clipboard shortcuts.
+ *
+ * @param key  The GLFW key code to remove (e.g. GLFW_KEY_C, GLFW_KEY_V).
+ */
+void input_consume_key(int key);
+
+/**
+ * @brief Poll raylib for all queued key presses (GetKeyPressed) and write the
  * resulting terminal sequences to `fd`.  Also checks held modifier keys
  * (Shift, Ctrl, Alt) at the time of each press.
  *

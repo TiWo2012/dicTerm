@@ -90,16 +90,18 @@ add_library(core STATIC
 target_include_directories(core PUBLIC ${INC_DIR})
 
 # libtty: terminal I/O modules that depend on raylib.
-#   font  – glyph-atlas font rendering, multi-font fallback
-#   input – keyboard event → escape-sequence conversion
+#   font     – glyph-atlas font rendering, multi-font fallback
+#   input    – keyboard event → escape-sequence conversion
+#   clipboard – GLFW + X11 clipboard integration
 add_library(tty STATIC
     src/font.c
     src/gl_renderer.c
     src/input.c
+    src/clipboard.c
 )
 target_include_directories(tty PUBLIC ${INC_DIR})
 target_include_directories(tty PRIVATE ${FREETYPE2_INCLUDE_DIRS} ${HARFBUZZ_INCLUDE_DIRS})
-target_link_libraries(tty PUBLIC glfw ${FREETYPE2_LIBRARIES} ${HARFBUZZ_LIBRARIES} GL m)
+target_link_libraries(tty PUBLIC glfw ${FREETYPE2_LIBRARIES} ${HARFBUZZ_LIBRARIES} GL m ${CMAKE_DL_LIBS})
 
 # ── Main executable ────────────────────────────────────────────────────────
 add_executable(${PROJECT_NAME} src/main.c)
@@ -123,6 +125,12 @@ function(add_dicterm_test NAME)
 endfunction()
 
 # ── Test executables ───────────────────────────────────────────────────────
+# Tests against libtty (need GLFW for clipboard module).
+add_dicterm_test(test_clipboard
+    src/test_clipboard.c
+)
+target_link_libraries(test_clipboard PRIVATE tty)
+
 # Tests against libcore (no raylib needed).
 add_dicterm_test(test_parser
     src/test_parser.c
@@ -175,7 +183,7 @@ enable_testing()
 
 # ── Auto-run tests in Debug builds ────────────────────────────────────────
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    foreach(tgt test_parser test_config test_scrollback test_screen test_ansi_colors
+    foreach(tgt test_clipboard test_parser test_config test_scrollback test_screen test_ansi_colors
                  test_integration test_terminal test_input test_font_codepoints)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND $<TARGET_FILE:${tgt}>
@@ -184,7 +192,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         )
     endforeach()
     add_dependencies(${PROJECT_NAME}
-        test_parser test_config test_scrollback test_screen test_ansi_colors
+        test_clipboard test_parser test_config test_scrollback test_screen test_ansi_colors
         test_integration test_terminal test_input test_font_codepoints
     )
 endif()

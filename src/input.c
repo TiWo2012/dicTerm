@@ -293,6 +293,28 @@ bool input_key_down(int key) {
 }
 
 /**
+ * @brief Remove a key from the pending key queue so it won't be forwarded
+ *        to the PTY.  Used to intercept clipboard shortcuts (Ctrl+Shift+C,
+ *        Ctrl+Shift+V, Shift+Insert) in main.c.
+ *
+ * @param key  The GLFW key to remove (e.g. GLFW_KEY_C, GLFW_KEY_V).
+ */
+void input_consume_key(int key) {
+  for (int i = 0; i < key_queue_count; i++) {
+    if (key_queue[i] == key) {
+      // Shift remaining entries down
+      int remaining = key_queue_count - i - 1;
+      if (remaining > 0)
+        memmove(&key_queue[i], &key_queue[i + 1],
+                (size_t)remaining * sizeof(key_queue[0]));
+      key_queue_count--;
+      pressed[key] = false;
+      break;
+    }
+  }
+}
+
+/**
  * @brief Poll raylib and write all pending key events to a file descriptor.
  *
  * Two-phase processing:
