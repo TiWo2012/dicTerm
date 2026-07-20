@@ -1,2 +1,0 @@
-/usr/bin/llvm-ar qc libtty.a CMakeFiles/tty.dir/src/font.c.o CMakeFiles/tty.dir/src/gl_renderer.c.o CMakeFiles/tty.dir/src/input.c.o
-/usr/bin/llvm-ranlib libtty.a

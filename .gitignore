@@ -1,3 +1,4 @@
 build/
+build-rel/
 compile_commands.json
 tags

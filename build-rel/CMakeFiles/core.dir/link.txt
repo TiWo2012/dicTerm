@@ -1,2 +1,0 @@
-/usr/bin/llvm-ar qc libcore.a CMakeFiles/core.dir/src/config.c.o CMakeFiles/core.dir/src/parser.c.o CMakeFiles/core.dir/src/screen.c.o CMakeFiles/core.dir/src/scrollback.c.o
-/usr/bin/llvm-ranlib libcore.a
