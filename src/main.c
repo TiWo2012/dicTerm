@@ -44,11 +44,15 @@ static int WIN_HEIGHT = 800;
 
 /** @brief Top-level terminal emulator state. */
 typedef struct {
-  screen_buf_t  screen;            /**< Visible screen grid with SGR attributes. */
+  screen_buf_t  screen;            /**< Active screen grid with SGR attributes. */
+  screen_buf_t  alt_screen;        /**< Alternate screen buffer (lazy init). */
+  bool          use_alt_screen;    /**< True when alternate screen is active. */
   int           cx;                /**< Cursor column (0-based). */
   int           cy;                /**< Cursor row (0-based). */
   int           saved_cx;          /**< Saved cursor column (DECSC/DECRC). */
   int           saved_cy;          /**< Saved cursor row (DECSC/DECRC). */
+  int           saved_cx_1048;     /**< Saved cursor column (DEC ?1048). */
+  int           saved_cy_1048;     /**< Saved cursor row (DEC ?1048). */
 
   uint8_t       cur_fg[3];         /**< Current SGR foreground colour (RGB). */
   uint8_t       cur_bg[3];         /**< Current SGR background colour (RGB). */
@@ -583,6 +587,56 @@ static void set_bright_bg(terminal_t *t, int idx) {
 }
 
 // ---------------------------------------------------------------------------
+// Alternate screen buffer management
+// ---------------------------------------------------------------------------
+
+/// @brief Switch to the alternate screen buffer.
+///
+/// If the alternate screen hasn't been allocated yet, it is created with
+/// the same dimensions as the current screen.  The active screen and
+/// alternate screen are swapped (so the current screen content is saved),
+/// the new screen is cleared, and the cursor is reset to (0,0).
+/// Scrollback mode is also reset.
+///
+/// @param t  Terminal state.
+static void switch_to_alt_screen(terminal_t *t) {
+  if (t->use_alt_screen) return;
+  // Lazily allocate the alt screen buffer
+  if (!t->alt_screen.cells) {
+    screen_buf_t *sb = screen_buf_new(t->screen.rows, t->screen.cols);
+    if (!sb) return;
+    t->alt_screen = *sb;
+    free(sb);
+  }
+  // Swap the buffers: screen becomes the alt buffer, alt becomes primary
+  screen_buf_t tmp = t->screen;
+  t->screen = t->alt_screen;
+  t->alt_screen = tmp;
+  t->use_alt_screen = true;
+  // Clear the new active screen (the alt buffer)
+  for (int r = 0; r < t->screen.rows; r++)
+    screen_buf_clear_row(&t->screen, r, true);
+  t->cx = 0;
+  t->cy = 0;
+  t->scroll_offset = 0;
+}
+
+/// @brief Switch back to the primary screen buffer.
+///
+/// Swaps the active and alternate buffers back, restoring the original
+/// screen content.  Cursor is reset to (0,0) and scrollback mode exits.
+///
+/// @param t  Terminal state.
+static void switch_to_primary_screen(terminal_t *t) {
+  if (!t->use_alt_screen) return;
+  screen_buf_t tmp = t->screen;
+  t->screen = t->alt_screen;
+  t->alt_screen = tmp;
+  t->use_alt_screen = false;
+  t->scroll_offset = 0;
+}
+
+// ---------------------------------------------------------------------------
 // CSI handler – processes Control Sequence Introducer (ESC [ ... ) sequences.
 // ---------------------------------------------------------------------------
 
@@ -619,12 +673,45 @@ static void on_csi(int params[16], int num_params,
   // ---- DEC private SET/RESET (intermediate '?' → h/l) ----
   // Handles DECSET (h) and DECRST (l) for modes like:
   //   ?2004h/l – bracketed paste mode
+  //   ?1047h/l – alternate screen buffer
+  //   ?1048h/l – save/restore cursor
+  //   ?1049h/l – save cursor + alternate screen / restore cursor + primary screen
   if (num_intermediates > 0 && intermediates[0] == '?') {
     if (final == 'h' || final == 'l') {
       bool set = (final == 'h');
       int p = PARAM(0);
-      if (p == 2004) {
+      switch (p) {
+      case 2004:
         t->bracketed_paste = set;
+        break;
+      case 1047:
+        if (set)
+          switch_to_alt_screen(t);
+        else
+          switch_to_primary_screen(t);
+        break;
+      case 1048:
+        if (set) {
+          t->saved_cx_1048 = t->cx;
+          t->saved_cy_1048 = t->cy;
+        } else {
+          t->cx = t->saved_cx_1048;
+          t->cy = t->saved_cy_1048;
+        }
+        break;
+      case 1049:
+        if (set) {
+          t->saved_cx_1048 = t->cx;
+          t->saved_cy_1048 = t->cy;
+          switch_to_alt_screen(t);
+        } else {
+          switch_to_primary_screen(t);
+          t->cx = t->saved_cx_1048;
+          t->cy = t->saved_cy_1048;
+        }
+        break;
+      default:
+        break;
       }
       // Future: handle ?25 (cursor vis), ?1000/1002/1003 (mouse tracking)
     }
@@ -1635,6 +1722,8 @@ int main(void) {
       if (new_rows < 1) new_rows = 1;
       pty_resize(master_fd, new_cols, new_rows);
       screen_buf_resize(&term.screen, new_rows, new_cols);
+      if (term.alt_screen.cells)
+        screen_buf_resize(&term.alt_screen, new_rows, new_cols);
       mouse_update_geometry(new_cols, new_rows, WIN_PADDING, char_w, char_h);
       // Clamp cursor position after resize to prevent OOB access in render
       if (term.cx >= new_cols) term.cx = new_cols - 1;
@@ -1820,6 +1909,7 @@ int main(void) {
   close(master_fd);
   scrollback_destroy(term.scrollback);
   free(term.screen.cells);
+  if (term.alt_screen.cells) free(term.alt_screen.cells);
   free(line_buf);
   gl_renderer_destroy(gl_renderer);
   font_uninit(font);
