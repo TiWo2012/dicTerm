@@ -43,6 +43,8 @@ typedef struct {
   // ── Default colours ───────────────────────────────────────────────────
   uint8_t default_fg[3];    /**< Default foreground RGB (default 220,220,220). */
   uint8_t default_bg[3];    /**< Default background RGB (default 0,0,0). */
+  bool    clear_bg;          /**< Transparent background (default true). */
+  float   bg_opacity;        /**< Background opacity 0–1 when clear_bg is on (default 0). */
 } dicterm_config_t;
 
 // ---------------------------------------------------------------------------

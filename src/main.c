@@ -1367,6 +1367,8 @@ int main(void) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+  if (cfg.clear_bg)
+    glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
   GLFWwindow *window = glfwCreateWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm", NULL, NULL);
   if (!window) {
     const char *desc = NULL;
@@ -1398,6 +1400,10 @@ int main(void) {
     return 1;
   }
   gl_renderer_t *gl_renderer = gl_renderer_create(font);
+  if (gl_renderer) {
+    gl_renderer_set_clear_bg(gl_renderer, cfg.clear_bg);
+    gl_renderer_set_bg_opacity(gl_renderer, cfg.bg_opacity);
+  }
   if (!gl_renderer) {
     fprintf(stderr, "dicTerm: Failed to initialise the OpenGL renderer.\n");
     font_uninit(font);
@@ -1608,7 +1614,8 @@ int main(void) {
     glViewport(0, 0, term.win_width, term.win_height);
     glClearColor((float)default_bg[0] / 255.0f,
                  (float)default_bg[1] / 255.0f,
-                 (float)default_bg[2] / 255.0f, 1.0f);
+                 (float)default_bg[2] / 255.0f,
+                 cfg.clear_bg ? cfg.bg_opacity : 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (gl_renderer) gl_renderer_begin(gl_renderer, term.win_width, term.win_height);
 
