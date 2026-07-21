@@ -94,6 +94,8 @@ struct gl_renderer {
     int glyph_capacity;
     bool clear_bg;
     float bg_opacity;
+    float underline_pos;
+    float underline_thick;
 };
 
 static void *proc(const char *name) {
@@ -185,6 +187,11 @@ gl_renderer_t *gl_renderer_create(const font_handle_t *font) {
         return NULL;
     }
     FT_Set_Pixel_Sizes(r->face, 0, (unsigned int)font->font_size);
+    FT_Pos ul_pos = FT_MulFix(r->face->underline_position, r->face->size->metrics.y_scale);
+    FT_Pos ul_thick = FT_MulFix(r->face->underline_thickness, r->face->size->metrics.y_scale);
+    r->underline_pos = (float)ul_pos / 64.0f;
+    r->underline_thick = (float)ul_thick / 64.0f;
+    if (r->underline_thick < 1.0f) r->underline_thick = 1.0f;
     if (font->nerd_path[0] &&
         FT_New_Face(r->ft, font->nerd_path, 0, &r->nerd_face) == 0) {
         FT_Set_Pixel_Sizes(r->nerd_face, 0, (unsigned int)font->font_size);
@@ -401,7 +408,9 @@ void gl_renderer_draw_cells(gl_renderer_t *r, const screen_cell_t *cells, int co
             r->gl.draw_arrays(GL_TRIANGLES, 0, 6);
         }
     }
-    if (cells[0].underline)
-        draw_rect(r, x, y + cell_height - 2.0f, (float)count * cell_width, 1.0f, cells[0].fg, 1.0f);
+    if (cells[0].underline) {
+        float underline_y = y + cell_height - r->underline_pos - r->underline_thick / 2.0f;
+        draw_rect(r, x, underline_y, (float)count * cell_width, r->underline_thick, cells[0].fg, 1.0f);
+    }
     free(text);
 }
