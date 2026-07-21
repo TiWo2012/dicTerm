@@ -1649,6 +1649,7 @@ int main(void) {
         break;
       } else {
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EIO) { in_error_state = true; break; }
         perror("read");
         in_error_state = true;
         break;

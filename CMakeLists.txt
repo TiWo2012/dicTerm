@@ -52,7 +52,7 @@ set(COMMON_C_FLAGS "-std=c2y ${COMMON_WARNINGS_STR}")
 
 # Per-configuration flags
 set(CMAKE_C_FLAGS_DEBUG
-    "-g3 -Og -fsanitize=address,undefined -fno-omit-frame-pointer ${COMMON_C_FLAGS}")
+    "-g3 -Og -fsanitize=undefined -fno-omit-frame-pointer ${COMMON_C_FLAGS}")
 
 set(CMAKE_C_FLAGS_RELEASE
     "-O2 -DNDEBUG ${COMMON_C_FLAGS}")
