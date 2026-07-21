@@ -36,6 +36,7 @@
 #define DEFAULT_CLEAR_BG true
 #define DEFAULT_BG_OPACITY 0.5f
 #define DEFAULT_BG_BLUR true
+#define DEFAULT_NO_WINDOW_DECOR true
 
 static void set_defaults(dicterm_config_t *cfg) {
   cfg->rows               = DEFAULT_ROWS;
@@ -57,6 +58,7 @@ static void set_defaults(dicterm_config_t *cfg) {
   cfg->clear_bg           = DEFAULT_CLEAR_BG;
   cfg->bg_opacity         = DEFAULT_BG_OPACITY;
   cfg->bg_blur            = DEFAULT_BG_BLUR;
+  cfg->no_window_decor    = DEFAULT_NO_WINDOW_DECOR;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +141,9 @@ static void apply_key(dicterm_config_t *cfg, const char *key, const char *val) {
   } else if (strcmp(key, "bg_blur") == 0) {
     cfg->bg_blur = (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 ||
                     strcmp(val, "1") == 0);
+  } else if (strcmp(key, "window_decorations") == 0) {
+    cfg->no_window_decor = !(strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 ||
+                             strcmp(val, "1") == 0);
   }
   // Unknown keys are silently ignored.
 }

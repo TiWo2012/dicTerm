@@ -1469,6 +1469,7 @@ int main(void) {
   glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
   if (cfg.clear_bg)
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
+  glfwWindowHint(GLFW_DECORATED, cfg.no_window_decor ? GLFW_FALSE : GLFW_TRUE);
   GLFWwindow *window = glfwCreateWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm", NULL, NULL);
   if (!window) {
     const char *desc = NULL;

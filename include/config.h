@@ -33,6 +33,7 @@ typedef struct {
   int   win_width;          /**< Initial window width in px (default 1280). */
   int   win_height;         /**< Initial window height in px (default 800). */
   int   win_padding;        /**< Padding around terminal area (default 10). */
+  bool  no_window_decor;    /**< Disable window decorations / title bar (default true). */
 
   // ── Font ──────────────────────────────────────────────────────────────
   float font_size;          /**< Font point size (default 20.0). */
