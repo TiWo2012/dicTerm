@@ -2,11 +2,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
 #include <GLFW/glfw3.h>
+#if defined(HAS_X11)
 #define GLFW_EXPOSE_NATIVE_X11
 #include <GLFW/glfw3native.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#endif
 #include <GL/glcorearb.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -1390,10 +1392,12 @@ int main(void) {
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
 
-  // ── Background blur (X11 / KWin compositor) ──────────────────────────
-  // The _KDE_NET_WM_BLUR_BEHIND_REGION atom instructs KWin to blur
-  // behind the window.  We set a single rectangle covering the window
-  // and re-apply it on resize so the blur region stays in sync.
+  // ── Background blur ──────────────────────────────────────────────────
+  // Requests the compositor to blur the desktop behind the terminal.
+  // On X11 this uses the _KDE_NET_WM_BLUR_BEHIND_REGION atom (supported
+  // by KWin and other compositors that implement the KDE blur protocol).
+  // The region is re-applied on resize so it always covers the window.
+#if defined(HAS_X11)
   static unsigned long blur_rect[4] = {0, 0, 0, 0};
   static Atom blur_atom = None;
   static Display *x11_dpy = NULL;
@@ -1410,6 +1414,9 @@ int main(void) {
                         PropModeReplace, (unsigned char*)blur_rect, 4);
     }
   }
+#else
+  (void)cfg;
+#endif
 
   input_init(window);
   clipboard_init(window);
@@ -1604,13 +1611,14 @@ int main(void) {
       term.win_width  = new_w;
       term.win_height = new_h;
 
-      // Keep blur region in sync with window size
+#if defined(HAS_X11)
       if (blur_atom != None) {
         blur_rect[2] = (unsigned long)new_w;
         blur_rect[3] = (unsigned long)new_h;
         XChangeProperty(x11_dpy, x11_win, blur_atom, XA_CARDINAL, 32,
                         PropModeReplace, (unsigned char*)blur_rect, 4);
       }
+#endif
 
       int new_cols = (new_w - WIN_PADDING * 2) / (int)char_w;
       int new_rows = (new_h - WIN_PADDING * 2) / (int)char_h;

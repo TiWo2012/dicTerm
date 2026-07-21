@@ -116,6 +116,7 @@ target_link_libraries(${PROJECT_NAME}
 if(X11_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${X11_LIBRARIES})
     target_include_directories(${PROJECT_NAME} PRIVATE ${X11_INCLUDE_DIRS})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_X11)
 endif()
 
 # ── Helper: set compile options and includes for a test target ─────────────
