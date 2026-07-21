@@ -72,6 +72,7 @@ find_package(glfw3 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FREETYPE2 REQUIRED freetype2)
 pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
+pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
 
 # ── Include path helper ────────────────────────────────────────────────────
 set(INC_DIR ${CMAKE_SOURCE_DIR}/include)
@@ -100,8 +101,8 @@ add_library(tty STATIC
     src/clipboard.c
 )
 target_include_directories(tty PUBLIC ${INC_DIR})
-target_include_directories(tty PRIVATE ${FREETYPE2_INCLUDE_DIRS} ${HARFBUZZ_INCLUDE_DIRS})
-target_link_libraries(tty PUBLIC glfw ${FREETYPE2_LIBRARIES} ${HARFBUZZ_LIBRARIES} GL m ${CMAKE_DL_LIBS})
+target_include_directories(tty PRIVATE ${FREETYPE2_INCLUDE_DIRS} ${HARFBUZZ_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS})
+target_link_libraries(tty PUBLIC glfw ${FREETYPE2_LIBRARIES} ${HARFBUZZ_LIBRARIES} ${FONTCONFIG_LIBRARIES} GL m ${CMAKE_DL_LIBS})
 
 # ── Main executable ────────────────────────────────────────────────────────
 add_executable(${PROJECT_NAME} src/main.c)
