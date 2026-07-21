@@ -1,22 +1,30 @@
 # dicTerm
 
-A GPU-accelerated terminal emulator built with [raylib](https://www.raylib.com/) and C23 (C2y).
+A GPU-accelerated terminal emulator built with GLFW 3 + OpenGL 3.3 Core Profile
+and C23 (C2y).  Text rendering uses FreeType + HarfBuzz for font shaping, glyph
+caching, and ligature support.
 
 ## Status
 
 Early development – a minimal terminal that spawns a child shell, renders its
-output to a raylib window, and forwards keyboard input.  ANSI SGR colour
+output to a GLFW window, and forwards keyboard input.  ANSI SGR colour
 attributes (foreground, background, bold, underline) with full 24-bit RGB and
 256-colour palette support are implemented.  Multi-font fallback rendering
 with automatic discovery of Maple Mono, Nerd Fonts, and symbol fallback fonts
-is functional.  Scrollback history viewing with viewport navigation is
-implemented.  Richer terminal features are on the roadmap.
+is functional.  Scrollback history viewing with viewport navigation, text
+selection, clipboard integration (CLIPBOARD + PRIMARY), mouse tracking, and
+HarfBuzz-based ligature shaping are implemented.
 
 ## Dependencies
 
 - **clang** 16+ (C23 / `-std=c2y`)
 - **cmake** 3.20+
-- **raylib** (system-installed; tested with 5.x / 6.x)
+- **glfw3** (system-installed; tested with 3.4)
+- **freetype2** (TrueType/OpenType font loading)
+- **harfbuzz** (glyph shaping with ligature support)
+- **fontconfig** (system font discovery)
+- **X11** (optional; enables `bg_blur` compositor blur via `_KDE_NET_WM_BLUR_BEHIND_REGION`)
+- **xsel** (optional; enables X11 PRIMARY selection / middle-click paste)
 - **TrueType/OpenType font** (monospace recommended, e.g. Maple Mono,
   JetBrains Mono, Fira Code, DejaVu Sans Mono)
 - **Nerd Fonts** (optional, automatically detected for icon/powerline glyphs)
@@ -51,8 +59,9 @@ build/test_integration         # 22 integration tests (end-to-end sequences)
 build/test_terminal            # 41 terminal doc tests (cursor, erase, scroll)
 build/test_input               # 32 unit tests (key_to_seq, keyboard handling)
 build/test_font_codepoints     # 10 unit tests (codepoint list builder)
+build/test_clipboard           # unit tests (base64 decode, clipboard ops)
 
-ctest --test-dir build         # via CTest (all 9 suites, 241 tests total)
+ctest --test-dir build         # via CTest (all 10 suites)
 ```
 
 ## Usage
@@ -62,11 +71,18 @@ ctest --test-dir build         # via CTest (all 9 suites, 241 tests total)
 ```
 
 Opens a window running `/bin/bash` inside a pseudo-terminal.  Type normally;
-the shell output is rendered in the raylib window using the GPU-accelerated
-font atlas.  Close the window or type `exit` to quit.
+the shell output is rendered in the GLFW window using the GPU-accelerated
+OpenGL renderer with HarfBuzz-shaped glyphs.  Close the window or type `exit`
+to quit.
 
-The window title shows which fonts were loaded, e.g.:
-`dicTerm [MapleMono-Regular.ttf] nerd=AtkynsonMonoNerdFontMono-Regular.otf sym=NotoSansSymbols2-Regular.ttf`
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl` + `Shift` + `C` | Copy selection to clipboard |
+| `Ctrl` + `Shift` + `V` | Paste from clipboard (with bracketed-paste wrapping) |
+| `Shift` + `Insert` | Paste from X11 PRIMARY selection |
+| `Ctrl` + `Shift` + `U` | Cancel / reset (SGR 0) |
 
 ### Scrollback (history) navigation
 
@@ -85,6 +101,40 @@ shown at the bottom of the window.  Press any regular key (letter, Enter,
 Ctrl+C, etc.) to return to the normal terminal view.  The viewport
 automatically stays stable when new output arrives from the shell.
 
+### Mouse
+
+- **Text selection**: click and drag with the left mouse button while mouse
+  tracking is disabled (default).  Selected text is highlighted in reverse
+  colours.  The selection is automatically copied to the X11 PRIMARY
+  selection on release.
+- **Middle-click**: pastes from the X11 PRIMARY selection.
+- **Mouse tracking**: enabled by terminal applications that request it
+  (X10, VT200, SGR, urxvt, SGR-pixels).  When mouse tracking is active,
+  click-and-drag is forwarded to the application instead of performing
+  local text selection.
+
+### Window decorations
+
+By default the window has no OS title bar / decorations.  You can re-enable
+them in the config file:
+
+```conf
+window_decorations = true
+```
+
+### Transparent background
+
+dicTerm supports a transparent framebuffer (Porter/Duff `src-over` blending)
+so the compositor can show the desktop behind the terminal.  The effective
+opacity is controlled by `bg_opacity` (0.0–1.0).  On KWin and compatible
+compositors, `bg_blur` enables a blur effect behind the window.
+
+```conf
+clear_bg   = true     # enable transparent framebuffer
+bg_opacity = 0.5      # background opacity 0–1
+bg_blur    = true     # request compositor blur (X11, KDE atom)
+```
+
 ### Configuration
 
 dicTerm reads a Unix-style `.conf` file at startup.  The search order (first existing wins) is:
@@ -99,8 +149,6 @@ A commented example is shipped in `.config/dicTerm.conf.example`.
 
 #### Install or edit the configuration file
 
-You have several options:
-
 **1. Copy the example to your config directory**
 ```bash
 mkdir -p ~/.config/dicTerm
@@ -110,7 +158,6 @@ $EDITOR ~/.config/dicTerm/dicTerm.conf
 
 **2. Use the installation script**
 ```bash
-# Execute this from the repository root
 ./.config/install.sh
 ```
 
@@ -125,26 +172,29 @@ cp .config/dicTerm.conf.example .config/dicTerm.conf
 $EDITOR .config/dicTerm.conf
 ```
 
-Edit the configuration file with your desired values.  Refer to the format section below and `config.h` for the available options.
-
-**Format**
+#### Format
 
 ```conf
 rows         = 36          # visible terminal rows
 cols         = 100         # visible terminal columns
-scrollback   = 1000       # scrollback ring-buffer line count
-font_size    = 20.0        # font point size in pixels (pixels)
+scrollback   = 1000        # scrollback ring-buffer line count
+font_size    = 20.0        # font point size in pixels
 
-window_width  = 1280       # initial window width (pixels)
-window_height = 800        # initial window height (pixels)
-window_padding = 10        # padding around the terminal text area
+window_width      = 1280   # initial window width (pixels)
+window_height     = 800    # initial window height (pixels)
+window_padding    = 10     # padding around the terminal text area
+window_decorations = false # show OS window decorations / title bar
 
-font_regular  =            # path to regular font (blank = auto-discover)
-font_nerd      =            # path to Nerd Font (blank = auto-discover)
-font_symbols   =            # path to symbol fallback font (blank = auto-discover)
+clear_bg   = true          # transparent framebuffer for compositor blending
+bg_opacity = 0.5           # background opacity 0–1 when clear_bg is on
+bg_blur    = false         # request compositor blur behind window (X11 KDE)
 
-foreground = 220,220,220   # default text colour as "R,G,B" (0–255)
-background = 0,0,0         # default background colour
+font_regular  =             # path to regular font (blank = auto-discover)
+font_nerd      =             # path to Nerd Font (blank = auto-discover)
+font_symbols   =             # path to symbol fallback font (blank = auto-discover)
+
+foreground = 220,220,220    # default text colour as "R,G,B" (0–255)
+background = 0,0,0          # default background colour
 ```
 
 Lines beginning with `#` or `;` are comments.  Unknown keys are silently ignored.
@@ -153,7 +203,8 @@ Malformed `R,G,B` colour tuples fall back to the default.
 
 ### Font rendering
 
-dicTerm uses a **three-font fallback system** to maximise glyph coverage:
+dicTerm uses a **three-font fallback system** to maximise glyph coverage,
+rendered via FreeType + HarfBuzz and cached in an OpenGL glyph atlas:
 
 1. **Regular font** (e.g. Maple Mono) — primary rendering font for everyday
    text.  Auto-discovered from common system font directories.
@@ -162,9 +213,11 @@ dicTerm uses a **three-font fallback system** to maximise glyph coverage:
 3. **Symbol fallback** (e.g. Noto Sans Symbols 2) — fallback for Unicode
    symbols not covered by the above two (geometric shapes, dingbats, etc.).
 
-When rendering a character, `pick_glyph_font()` checks each font in turn
-and uses the first one that has a non-zero atlas rectangle for the glyph.
-If none have it, a `?` is rendered from the regular font.
+When rendering a line of text, HarfBuzz shapes the codepoints into glyphs with
+ligature and contextual-alternate features enabled (`liga`, `clig`).  Each
+glyph is rendered from the OpenGL atlas; if a glyph is missing from the
+primary font, the fallback fonts are checked in order.  If no font has the
+glyph, a `?` is rendered from the regular font.
 
 The font atlas is built with `FONT_MAX_CODEPOINTS` (8192) entries covering
 ASCII printable (0x20–0x7E) plus Nerd Font PUA ranges (box drawing, powerline,
@@ -173,7 +226,7 @@ devicons, Font Awesome, Material Design Icons).
 ## Project structure
 
 ```
-├── CMakeLists.txt          # Build: dicTerm + 9 test executables
+├── CMakeLists.txt          # Build: dicTerm + 10 test executables
 ├── Doxyfile                # Doxygen documentation configuration
 ├── .config/
 │   ├── dicTerm.conf.example   # Sample configuration file
@@ -182,17 +235,24 @@ devicons, Font Awesome, Material Design Icons).
 ├── include/
 │   ├── config.h            # Terminal configuration (default + INI parser)
 │   ├── parser.h            # ECMA-48 escape sequence parser API
-│   ├── font.h              # Font rendering subsystem (glyph atlas + Nerd Fonts)
-│   ├── input.h             # Keyboard input → PTY sequence converter
+│   ├── font.h              # Font loading (FreeType + HarfBuzz)
+│   ├── gl_renderer.h       # OpenGL 3.3 renderer (glyph atlas, shaping)
+│   ├── input.h             # Keyboard input + mouse tracking
+│   ├── clipboard.h         # Clipboard integration (GLFW + xsel)
 │   ├── scrollback.h        # Scrollback ring buffer
 │   └── screen.h            # Screen cell with SGR colour attributes
 ├── src/
 │   ├── main.c              # Terminal emulator: PTY, screen, SGR callbacks,
-│   │                       #   scrollback viewport, UTF-8 decoder, rendering
+│   │                       #   scrollback viewport, UTF-8 decoder, selection,
+│   │                       #   clipboard shortcuts, blur behind window
 │   ├── config.c            # INI-style configuration file parser
 │   ├── parser.c            # ANSI escape sequence state machine
-│   ├── font.c              # TrueType font loader, glyph atlas, multi-font fallback
-│   ├── input.c             # Keyboard handling (GetCharPressed + GetKeyPressed)
+│   ├── font.c              # TrueType/OpenType font loader, glyph cache
+│   ├── gl_renderer.c       # OpenGL 3.3 renderer: glyph atlas, HarfBuzz
+│   │                       #   shaping, ligature support, cell drawing
+│   ├── input.c             # Keyboard handling + mouse tracking (X10, VT200,
+│   │                       #   SGR, urxvt, SGR pixels)
+│   ├── clipboard.c         # GLFW clipboard + X11 PRIMARY selection (xsel)
 │   ├── scrollback.c        # Line-based ring buffer
 │   ├── screen.c            # Screen grid buffer (per-cell fg/bg colours)
 │   │
@@ -204,7 +264,8 @@ devicons, Font Awesome, Material Design Icons).
 │   ├── test_integration.c  # 22 integration tests (real-world sequences)
 │   ├── test_terminal.c     # 41 terminal doc tests (cursor/erase/scroll)
 │   ├── test_input.c        # 32 unit tests (key_to_seq, keyboard mappings)
-│   └── test_font_codepoints.c  # 10 unit tests (codepoint list builder)
+│   ├── test_font_codepoints.c # 10 unit tests (codepoint list builder)
+│   └── test_clipboard.c    # Unit tests (base64 decode, clipboard ops)
 └── .opencode/
     ├── agents/             # Development agent definitions
     └── package.json        # opencode configuration
@@ -213,76 +274,88 @@ devicons, Font Awesome, Material Design Icons).
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                     raylib window                          │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  render_cell() per cell: bg rect, fg glyph,           │  │
-│  │  pseudo-bold offset, underline line                   │  │
-│  │  pick_glyph_font() for multi-font fallback            │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────┬──────────────────────────────────┘
-                         │
-┌────────────────────────▼──────────────────────────────────┐
-│                       main.c                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │  PTY master   │  │  screen[][] │  │  parser_t    │     │
-│  │  (forkpty)    │──│  + cx,cy    │──│  (callbacks) │     │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
-│         │                 │                 │             │
-│         │         ┌───────▼────────┐        │             │
-│         │         │  font_handle_t │        │             │
-│         │         │  - regular     │        │             │
-│         │         │  - nerd        │        │ parser_feed │
-│         │         │  - symbols     │        │             │
-│         │         │  - glyph_cache │        │             │
-│         │         └───────▲────────┘        │             │
-│         │  keyboard       │                 │             │
-│         │  input          │                 │             │
-│         │  (input.c)      │                 │             │
-│         │                 │                 │             │
-│         │  UTF-8 decoder  │  pick_glyph_    │             │
-│         │  (byte-at-a-time) │ font()        │             │
-└─────────┼─────────────────┼─────────────────┼─────────────┘
-          │                 │                 │
-          ▼                 │                 ▼
-     ┌──────────┐           │          ┌──────────────┐
-     │  bash    │           │          │  parser.c    │
-     │  (child) │           │          │  state machine│
-     └──────────┘           │          └──────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        GLFW window                               │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  gl_renderer_draw_cells():                                  │  │
+│  │   • HarfBuzz shape (liga/clig features enabled)             │  │
+│  │   • OpenGL glyph atlas lookup (multi-font fallback)         │  │
+│  │   • Per-cell rendering: bg rect, fg glyph, underline        │  │
+│  │   • Selection highlight (swap fg/bg)                        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                         main.c                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
+│  │  PTY master   │  │  screen[][] │  │  parser_t    │           │
+│  │  (forkpty)    │──│  + cx,cy    │──│  (callbacks) │           │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
+│         │                 │                  │                  │
+│         │         ┌───────▼────────┐         │                  │
+│         │         │  font_handle_t  │         │                  │
+│         │         │  + gl_renderer  │         │ parser_feed      │
+│         │         └───────▲────────┘         │                  │
+│         │  clipboard      │                  │                  │
+│         │  (clipboard.c)  │                  │                  │
+│         │  mouse          │                  │                  │
+│         │  (input.c)      │                  │                  │
+│         │                 │                  │                  │
+│         │  UTF-8 decoder  │  gl_renderer_    │                  │
+│         │  (byte-at-a-time) │ draw_cells()   │                  │
+└─────────┼─────────────────┼──────────────────┼──────────────────┘
+          │                 │                  │
+          ▼                 │                  ▼
+     ┌──────────┐           │           ┌──────────────┐
+     │  bash    │           │           │  parser.c    │
+     │  (child) │           │           │  state machine│
+     └──────────┘           │           └──────────────┘
                            ▼
                     ┌──────────────┐
-                    │  font.c      │
-                    │  LoadFontEx  │
-                    │  DrawText-   │
-                    │  Codepoints  │
-                    │  Nerd PUA    │
+                    │  font.c +    │
+                    │  gl_renderer │
+                    │  FreeType    │
+                    │  HarfBuzz    │
+                    │  OpenGL 3.3  │
                     └──────────────┘
 ```
 
 ## What's implemented
 
 ### Font rendering (`font.c` / `font.h`)
-- TrueType/OpenType font loading via `LoadFontEx` with codepoint range
+- TrueType/OpenType font loading via FreeType
 - Three-font fallback: regular → nerd → symbols → `?`
-- Glyph atlas caching with raylib's built-in texture management
 - Nerd Fonts auto-detection from common system paths (TTF/OTF subdirectories)
 - PUA codepoint ranges for Nerd Font icons (powerline, devicons,
   Font Awesome, Material Design, box drawing, geometric shapes)
 - Hot-swappable font selection: `font_select(handle, "nerd")` / `"regular"`
-- Glyph index cache for O(1) codepoint → glyph lookups
-- Sub-pixel positioning with proper ascent/descent metrics
 - Font discovery: automatic search for monospace + Nerd Fonts + symbols
-- `font_has_glyph()` — direct `f->recs[]` access (avoids raylib's built-in
-  `?` fallback in `GetGlyphAtlasRec()`)
+- `font_has_glyph()` — direct glyph cache access
+
+### OpenGL renderer (`gl_renderer.c` / `gl_renderer.h`)
+- OpenGL 3.3 Core Profile renderer with glyph atlas texture
+- HarfBuzz shaping with ligature (`liga`) and contextual alternate (`clig`)
+- Multi-font fallback during shaping
+- Sub-pixel positioning with proper ascent/descent metrics
+- Per-cell rendering: background fills, foreground glyphs,
+  pseudo-bold (1 px offset), underline
+- Transparent framebuffer support (`clear_bg` + `bg_opacity`)
+
+### Clipboard (`clipboard.c` / `clipboard.h`)
+- GLFW clipboard API for CLIPBOARD selection (Ctrl+Shift+C / Ctrl+Shift+V)
+- X11 PRIMARY selection via `xsel` (middle-click paste)
+- OSC 52 escape sequence support (programmatic clipboard access)
+- Base64 decoder for OSC 52 payloads
+- Bracketed paste mode wrapping
 
 ### Configuration (`config.c` / `config.h`)
-
-- INI-style configuration file parser (sections + `key = value`)
+- INI-style configuration file parser (key = value)
 - Default values applied before file parse; file overlays defaults only
-- Searches `$XDG_CONFIG_HOME/dicTerm/config`, falls back to built-in defaults
+- Searches `$XDG_CONFIG_HOME/dicTerm/dicTerm.conf`, falls back to built-in defaults
 - Configurable: terminal rows/cols, scrollback capacity, font size, window
-  dimensions, padding, font paths, and default fg/bg colours
-- Robust parsing: comments (`#`/`;`), whitespace trimming, unknown-section/key
+  dimensions, padding, font paths, window decorations, transparency/opacity/blur,
+  and default fg/bg colours
+- Robust parsing: comments (`#`/`;`), whitespace trimming, unknown-key
   tolerance, bounds-checked numeric and RGB values
 - 7 unit tests with 100% pass rate
 
@@ -302,6 +375,8 @@ devicons, Font Awesome, Material Design Icons).
 - **Scrollback viewport**: browse historical output with Page Up/Down and
   Shift+Up/Down; viewport stays stable when new output arrives; cursor
   hidden in history mode; scrollback indicator bar
+- **Text selection**: click-drag mouse selection with reverse-colour highlight;
+  auto-copy to PRIMARY on release
 - **C0 controls**: LF, CR, BS, HT, VT, FF
 - **CSI cursor movement**: CUU, CUD, CUF, CUB, CUP, HVP
 - **CSI erase**: ED (clear display), EL (clear line)
@@ -315,23 +390,29 @@ devicons, Font Awesome, Material Design Icons).
   - Default resets: 39 (fg), 49 (bg)
   - Attributes: 0 (reset), 1 (bold), 4 (underline), 22/24 (off)
 - **ESC sequences**: DECSC/DECRC (save/restore cursor), IND, RI, NEL, RIS, HTS
+- **OSC sequences**: OSC 0/2 (icon/title set), OSC 52 (clipboard), OSC 104 (reset palette)
+- **DEC private modes**: cursor visibility, mouse tracking (X10/VT200/SGR/urxvt/SGR-pixels),
+  alternate screen buffer, bracketed paste
 - Keyboard input via `input.c` with modifier support (Ctrl, Alt, Shift)
+- Clipboard shortcuts (Ctrl+Shift+C/V, Shift+Insert, Ctrl+Shift+U)
 - Cursor drawn as inverted block
 - Window resizing with PTY resize notification
 - Non-blocking PTY I/O
-- Per-cell rendering: each character drawn individually with its own fg/bg
-  colour, background fills, pseudo-bold (1 px offset), and underline
 - Parser stuck detection: reset after 60 frames in non-GROUND state
+- Background blur behind window via `_KDE_NET_WM_BLUR_BEHIND_REGION` X11 atom
+- Window decorations toggle (default off)
 
-### Keyboard input (`input.c` / `input.h`)
-- `key_to_seq()` — raylib key → terminal escape sequence converter
-- Printable characters via `GetCharPressed()` with proper Shift/Caps
+### Keyboard & mouse input (`input.c` / `input.h`)
+- `key_to_seq()` — GLFW key → terminal escape sequence converter
+- Printable characters via GLFW character callback with proper Shift/Caps
 - Ctrl+A–Z → 0x01–0x1A
 - Alt+key → ESC prefix + key sequence
 - Arrow keys (plain, Ctrl+arrows for word jumps)
 - Home/End, Page Up/Down, Insert/Delete
 - F1–F12 (xterm-style)
 - Keypad digits and operators
+- Mouse tracking: X10, VT200 (normal + button-event + any-event), SGR,
+  urxvt, SGR-pixels
 - 32 unit tests with 100% pass rate
 
 ### Scrollback buffer (`scrollback.c` / `scrollback.h`)
@@ -365,7 +446,7 @@ documented with Doxygen comments.
 
 ## Roadmap
 
-- [x] Font rendering (glyph atlas, TrueType via raylib, Nerd Fonts support)
+- [x] Font rendering (glyph atlas, TrueType via FreeType, Nerd Fonts support)
 - [x] SGR colour attributes (standard/bright/extended foreground, background,
       bold, underline)
 - [x] 256-colour palette and 24-bit truecolor RGB support
@@ -373,6 +454,13 @@ documented with Doxygen comments.
 - [x] Multi-font fallback (regular → nerd → symbols → `?`)
 - [x] UTF-8 decoder for multi-byte Unicode codepoints
 - [x] Configuration file
-- [x] Mouse support
+- [x] Mouse support (X10, VT200, SGR, urxvt, SGR-pixels)
 - [x] Clipboard integration (copy/paste, selection, OSC 52, bracketed paste)
-- [x] Font ligature support
+- [x] Font ligature support (HarfBuzz shaping with liga/clig)
+- [x] Transparent framebuffer / background opacity
+- [x] Background blur behind window
+- [x] Text selection (click-drag, PRIMARY auto-copy)
+- [x] Alternate screen buffer
+- [ ] GPU-accelerated rendering via OpenGL
+- [ ] Tabbed / multi-window support
+- [ ] Sixel / Kitty graphics protocol
