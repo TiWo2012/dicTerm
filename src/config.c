@@ -33,6 +33,9 @@
 #define DEFAULT_BG_R   0
 #define DEFAULT_BG_G   0
 #define DEFAULT_BG_B   0
+#define DEFAULT_CLEAR_BG true
+#define DEFAULT_BG_OPACITY 0.5f
+#define DEFAULT_BG_BLUR true
 
 static void set_defaults(dicterm_config_t *cfg) {
   cfg->rows               = DEFAULT_ROWS;
@@ -51,6 +54,9 @@ static void set_defaults(dicterm_config_t *cfg) {
   cfg->default_bg[0]      = DEFAULT_BG_R;
   cfg->default_bg[1]      = DEFAULT_BG_G;
   cfg->default_bg[2]      = DEFAULT_BG_B;
+  cfg->clear_bg           = DEFAULT_CLEAR_BG;
+  cfg->bg_opacity         = DEFAULT_BG_OPACITY;
+  cfg->bg_blur            = DEFAULT_BG_BLUR;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +130,15 @@ static void apply_key(dicterm_config_t *cfg, const char *key, const char *val) {
     parse_rgb(val, cfg->default_fg);
   } else if (strcmp(key, "background") == 0) {
     parse_rgb(val, cfg->default_bg);
+  } else if (strcmp(key, "clear_bg") == 0) {
+    cfg->clear_bg = (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 ||
+                     strcmp(val, "1") == 0);
+  } else if (strcmp(key, "bg_opacity") == 0) {
+    fval = (float)atof(val);
+    if (fval >= 0.0f && fval <= 1.0f) cfg->bg_opacity = fval;
+  } else if (strcmp(key, "bg_blur") == 0) {
+    cfg->bg_blur = (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 ||
+                    strcmp(val, "1") == 0);
   }
   // Unknown keys are silently ignored.
 }

@@ -3,6 +3,12 @@
 #include <fcntl.h>
 #include <pty.h>
 #include <GLFW/glfw3.h>
+#if defined(HAS_X11)
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#endif
 #include <GL/glcorearb.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -1374,6 +1380,8 @@ int main(void) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+  if (cfg.clear_bg)
+    glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
   GLFWwindow *window = glfwCreateWindow(WIN_WIDTH, WIN_HEIGHT, "dicTerm", NULL, NULL);
   if (!window) {
     const char *desc = NULL;
@@ -1390,6 +1398,33 @@ int main(void) {
   }
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
+
+  // ── Background blur ──────────────────────────────────────────────────
+  // Requests the compositor to blur the desktop behind the terminal.
+  // On X11 this uses the _KDE_NET_WM_BLUR_BEHIND_REGION atom (supported
+  // by KWin and other compositors that implement the KDE blur protocol).
+  // The region is re-applied on resize so it always covers the window.
+#if defined(HAS_X11)
+  static unsigned long blur_rect[4] = {0, 0, 0, 0};
+  static Atom blur_atom = None;
+  static Display *x11_dpy = NULL;
+  static Window x11_win = 0;
+  if (cfg.bg_blur) {
+    x11_dpy = glfwGetX11Display();
+    x11_win = glfwGetX11Window(window);
+    if (x11_dpy && x11_win) {
+      blur_atom = XInternAtom(x11_dpy, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
+      blur_rect[2] = (unsigned long)WIN_WIDTH;
+      blur_rect[3] = (unsigned long)WIN_HEIGHT;
+      if (blur_atom != None)
+        XChangeProperty(x11_dpy, x11_win, blur_atom, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char*)blur_rect, 4);
+    }
+  }
+#else
+  (void)cfg;
+#endif
+
   input_init(window);
   clipboard_init(window);
 
@@ -1405,6 +1440,10 @@ int main(void) {
     return 1;
   }
   gl_renderer_t *gl_renderer = gl_renderer_create(font);
+  if (gl_renderer) {
+    gl_renderer_set_clear_bg(gl_renderer, cfg.clear_bg);
+    gl_renderer_set_bg_opacity(gl_renderer, cfg.bg_opacity);
+  }
   if (!gl_renderer) {
     fprintf(stderr, "dicTerm: Failed to initialise the OpenGL renderer.\n");
     font_uninit(font);
@@ -1580,6 +1619,16 @@ int main(void) {
     if (new_w != term.win_width || new_h != term.win_height) {
       term.win_width  = new_w;
       term.win_height = new_h;
+
+#if defined(HAS_X11)
+      if (blur_atom != None) {
+        blur_rect[2] = (unsigned long)new_w;
+        blur_rect[3] = (unsigned long)new_h;
+        XChangeProperty(x11_dpy, x11_win, blur_atom, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char*)blur_rect, 4);
+      }
+#endif
+
       int new_cols = (new_w - WIN_PADDING * 2) / (int)char_w;
       int new_rows = (new_h - WIN_PADDING * 2) / (int)char_h;
       if (new_cols < 1) new_cols = 1;
@@ -1623,7 +1672,8 @@ int main(void) {
     glViewport(0, 0, term.win_width, term.win_height);
     glClearColor((float)default_bg[0] / 255.0f,
                  (float)default_bg[1] / 255.0f,
-                 (float)default_bg[2] / 255.0f, 1.0f);
+                 (float)default_bg[2] / 255.0f,
+                 cfg.clear_bg ? cfg.bg_opacity : 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (gl_renderer) gl_renderer_begin(gl_renderer, term.win_width, term.win_height);
 

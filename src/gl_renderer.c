@@ -92,6 +92,8 @@ struct gl_renderer {
     glyph_t *glyphs;
     int glyph_count;
     int glyph_capacity;
+    bool clear_bg;
+    float bg_opacity;
 };
 
 static void *proc(const char *name) {
@@ -234,6 +236,14 @@ void gl_renderer_begin(gl_renderer_t *r, int width, int height) {
 
 void gl_renderer_end(gl_renderer_t *r) { if (r) r->gl.use_program(0); }
 
+void gl_renderer_set_clear_bg(gl_renderer_t *r, bool clear_bg) {
+    if (r) r->clear_bg = clear_bg;
+}
+
+void gl_renderer_set_bg_opacity(gl_renderer_t *r, float opacity) {
+    if (r) r->bg_opacity = opacity;
+}
+
 static bool same_style(const screen_cell_t *a, const screen_cell_t *b) {
     return a->fg[0] == b->fg[0] && a->fg[1] == b->fg[1] &&
            a->fg[2] == b->fg[2] && a->bg[0] == b->bg[0] &&
@@ -289,7 +299,7 @@ static glyph_t *get_glyph(gl_renderer_t *r, FT_Face face, unsigned int face_id,
 }
 
 static void draw_rect(gl_renderer_t *r, float x, float y, float width,
-                      float height, const uint8_t color[3]) {
+                      float height, const uint8_t color[3], float alpha) {
     const float vertices[] = {
         x, y, 0.0f, 0.0f, x + width, y, 1.0f, 0.0f,
         x + width, y + height, 1.0f, 1.0f, x, y, 0.0f, 0.0f,
@@ -297,7 +307,7 @@ static void draw_rect(gl_renderer_t *r, float x, float y, float width,
     };
     r->gl.uniform1i(r->uniform_use_atlas, 0);
     r->gl.uniform4f(r->uniform_color, (float)color[0] / 255.0f,
-                    (float)color[1] / 255.0f, (float)color[2] / 255.0f, 1.0f);
+                    (float)color[1] / 255.0f, (float)color[2] / 255.0f, alpha);
     r->gl.bind_buffer(GL_ARRAY_BUFFER, r->vbo);
     r->gl.buffer_data(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(vertices), vertices, GL_STREAM_DRAW);
     r->gl.draw_arrays(GL_TRIANGLES, 0, 6);
@@ -328,8 +338,12 @@ void gl_renderer_draw_cells(gl_renderer_t *r, const screen_cell_t *cells, int co
         }
         return;
     }
-    for (int i = 0; i < count; i++)
-        draw_rect(r, x + (float)i * cell_width, y, cell_width, cell_height, cells[i].bg);
+    for (int i = 0; i < count; i++) {
+        float alpha = 1.0f;
+        if (r->clear_bg && cells[i].bg[0] == 0 && cells[i].bg[1] == 0 && cells[i].bg[2] == 0)
+            alpha = r->bg_opacity;
+        draw_rect(r, x + (float)i * cell_width, y, cell_width, cell_height, cells[i].bg, alpha);
+    }
     hb_codepoint_t *text = malloc((size_t)count * sizeof(*text)); if (!text) return;
     for (int i = 0; i < count; i++) text[i] = (hb_codepoint_t)(cells[i].ch < 0x20 ? ' ' : cells[i].ch);
     hb_buffer_clear_contents(r->buffer); hb_buffer_add_codepoints(r->buffer, text, count, 0, count); hb_buffer_set_direction(r->buffer, HB_DIRECTION_LTR); hb_buffer_set_script(r->buffer, HB_SCRIPT_LATIN); hb_buffer_set_language(r->buffer, hb_language_from_string("en", -1)); hb_feature_t features[] = {{HB_TAG('l','i','g','a'), 1, 0, (unsigned int)-1},{HB_TAG('c','l','i','g'), 1, 0, (unsigned int)-1}}; hb_shape(r->hb_font, r->buffer, features, 2);
@@ -388,6 +402,6 @@ void gl_renderer_draw_cells(gl_renderer_t *r, const screen_cell_t *cells, int co
         }
     }
     if (cells[0].underline)
-        draw_rect(r, x, y + cell_height - 2.0f, (float)count * cell_width, 1.0f, cells[0].fg);
+        draw_rect(r, x, y + cell_height - 2.0f, (float)count * cell_width, 1.0f, cells[0].fg, 1.0f);
     free(text);
 }

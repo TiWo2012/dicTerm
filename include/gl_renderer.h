@@ -15,5 +15,7 @@ void gl_renderer_draw_cells(gl_renderer_t *renderer,
                             const screen_cell_t *cells, int count,
                             float x, float y, float cell_width,
                             float cell_height);
+void gl_renderer_set_clear_bg(gl_renderer_t *renderer, bool clear_bg);
+void gl_renderer_set_bg_opacity(gl_renderer_t *renderer, float opacity);
 
 #endif

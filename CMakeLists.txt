@@ -74,6 +74,9 @@ pkg_check_modules(FREETYPE2 REQUIRED freetype2)
 pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
 pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
 
+# X11 for the _KDE_NET_WM_BLUR_BEHIND_REGION atom (used by KWin et al.).
+pkg_check_modules(X11 x11)
+
 # ── Include path helper ────────────────────────────────────────────────────
 set(INC_DIR ${CMAKE_SOURCE_DIR}/include)
 
@@ -111,6 +114,11 @@ target_link_libraries(${PROJECT_NAME}
         core
         tty
 )
+if(X11_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${X11_LIBRARIES})
+    target_include_directories(${PROJECT_NAME} PRIVATE ${X11_INCLUDE_DIRS})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_X11)
+endif()
 
 # ── Helper: set compile options and includes for a test target ─────────────
 function(add_dicterm_test NAME)
