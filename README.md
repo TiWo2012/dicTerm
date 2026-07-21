@@ -375,5 +375,4 @@ documented with Doxygen comments.
 - [x] Configuration file
 - [x] Mouse support
 - [x] Clipboard integration (copy/paste, selection, OSC 52, bracketed paste)
-- [ ] Clipboard integration
-- [ ] Font ligature support
+- [x] Font ligature support

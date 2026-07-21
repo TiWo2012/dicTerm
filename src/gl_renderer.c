@@ -332,20 +332,23 @@ void gl_renderer_draw_cells(gl_renderer_t *r, const screen_cell_t *cells, int co
         draw_rect(r, x + (float)i * cell_width, y, cell_width, cell_height, cells[i].bg);
     hb_codepoint_t *text = malloc((size_t)count * sizeof(*text)); if (!text) return;
     for (int i = 0; i < count; i++) text[i] = (hb_codepoint_t)(cells[i].ch < 0x20 ? ' ' : cells[i].ch);
-    hb_buffer_clear_contents(r->buffer); hb_buffer_add_codepoints(r->buffer, text, count, 0, count); hb_buffer_guess_segment_properties(r->buffer); hb_shape(r->hb_font, r->buffer, NULL, 0);
+    hb_buffer_clear_contents(r->buffer); hb_buffer_add_codepoints(r->buffer, text, count, 0, count); hb_buffer_set_direction(r->buffer, HB_DIRECTION_LTR); hb_buffer_set_script(r->buffer, HB_SCRIPT_LATIN); hb_buffer_set_language(r->buffer, hb_language_from_string("en", -1)); hb_feature_t features[] = {{HB_TAG('l','i','g','a'), 1, 0, (unsigned int)-1},{HB_TAG('c','l','i','g'), 1, 0, (unsigned int)-1}}; hb_shape(r->hb_font, r->buffer, features, 2);
     unsigned int n = 0; hb_glyph_info_t *info = hb_buffer_get_glyph_infos(r->buffer, &n); hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(r->buffer, &n);
     float cr = (float)cells[0].fg[0] / 255.0f, cg = (float)cells[0].fg[1] / 255.0f, cb = (float)cells[0].fg[2] / 255.0f;
     r->gl.uniform4f(r->uniform_color, cr, cg, cb, 1.0f);
     r->gl.uniform1i(r->uniform_use_atlas, 1);
+    float pen_x = x;
     for (unsigned int i = 0; i < n; i++) {
         FT_Face face = r->face;
         unsigned int face_id = 0;
         unsigned int glyph_id = info[i].codepoint;
         unsigned int cluster = info[i].cluster;
+        unsigned int next_cluster = (i + 1U < n) ? info[i + 1U].cluster : (unsigned int)count;
+        int span = (int)(next_cluster - cluster);
         if (r->nerd_face && cluster < (unsigned int)count &&
             FT_Get_Char_Index(r->face, (FT_ULong)text[cluster]) == 0) {
             unsigned int nerd_glyph = FT_Get_Char_Index(r->nerd_face,
-                                                         (FT_ULong)text[cluster]);
+                                                          (FT_ULong)text[cluster]);
             if (nerd_glyph) {
                 face = r->nerd_face;
                 face_id = 1;
@@ -353,13 +356,23 @@ void gl_renderer_draw_cells(gl_renderer_t *r, const screen_cell_t *cells, int co
             }
         }
         glyph_t *g = get_glyph(r, face, face_id, glyph_id);
-        if (!g) continue;
-        /* HarfBuzz clusters refer to input cells.  Anchor each glyph to its
-           cell rather than accumulating font advances, which can otherwise
-           drift away from the terminal grid when the configured cell width
-           differs slightly from the font's nominal advance. */
-        float gx = x + (float)info[i].cluster * cell_width +
-                   (float)pos[i].x_offset / 64.0f + (float)g->bearing_x;
+        if (!g) {
+            if (span > 1) pen_x += (float)pos[i].x_advance / 64.0f;
+            continue;
+        }
+        float gx;
+        if (span > 1) {
+            /* Ligature spanning multiple cells: position from the HarfBuzz
+               pen to let the glyph's natural advance define its extent. */
+            gx = pen_x + (float)pos[i].x_offset / 64.0f + (float)g->bearing_x;
+            pen_x += (float)pos[i].x_advance / 64.0f;
+        } else {
+            /* Single-cell glyph: anchor to the cell grid to prevent drift
+               when the configured cell width and font advance differ. */
+            gx = x + (float)cluster * cell_width +
+                 (float)pos[i].x_offset / 64.0f + (float)g->bearing_x;
+            pen_x = x + (float)(cluster + 1) * cell_width;
+        }
         float gy = y + cell_height - (float)g->bearing_y;
         float w = (float)g->width, h = (float)g->height;
         float v[] = {gx, gy, g->u0, g->v0, gx + w, gy, g->u1, g->v0,
