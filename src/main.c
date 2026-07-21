@@ -197,22 +197,26 @@ static uint8_t default_bg[3] = {  0,   0,   0};
 /// @param t      Terminal state.
 /// @param count  Number of rows to scroll up.
 static void scroll_up(terminal_t *t, int count) {
-  int cols = t->screen.cols;
-  int *line_buf = malloc((size_t)cols * sizeof(int));
+  int sb_cols = t->scrollback ? scrollback_cols(t->scrollback) : t->screen.cols;
+  int screen_cols = t->screen.cols;
+  int copy_cols = screen_cols < sb_cols ? screen_cols : sb_cols;
+  int *line_buf = malloc((size_t)sb_cols * sizeof(int));
   if (!line_buf) return;
   for (int n = 0; n < count; n++) {
-    // Copy the top row's codepoints into a plain buffer for scrollback
-    for (int c = 0; c < cols; c++)
+    // Copy the top row's codepoints, padding with spaces if screen is narrower
+    for (int c = 0; c < copy_cols; c++)
       line_buf[c] = t->screen.cells[c].ch;
+    for (int c = copy_cols; c < sb_cols; c++)
+      line_buf[c] = ' ';
     scrollback_push(t->scrollback, line_buf);
 
     // Shift all rows up by one
     memmove(t->screen.cells,
-            t->screen.cells + cols,
-             ((size_t)(t->screen.rows - 1) * (size_t)cols * sizeof(screen_cell_t)));
+            t->screen.cells + screen_cols,
+             ((size_t)(t->screen.rows - 1) * (size_t)screen_cols * sizeof(screen_cell_t)));
     // Clear the new bottom row
-    for (int c = 0; c < cols; c++) {
-      screen_cell_t *cell = &t->screen.cells[(t->screen.rows - 1) * cols + c];
+    for (int c = 0; c < screen_cols; c++) {
+      screen_cell_t *cell = &t->screen.cells[(t->screen.rows - 1) * screen_cols + c];
       cell->ch = ' ';
       cell->fg[0] = default_fg[0]; cell->fg[1] = default_fg[1]; cell->fg[2] = default_fg[2];
       cell->bg[0] = default_bg[0]; cell->bg[1] = default_bg[1]; cell->bg[2] = default_bg[2];
@@ -1227,7 +1231,10 @@ static int write_all(int fd, const void *buf, size_t len) {
         } else if (r == 0) {
             return -1;
         } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(1000); // yield to avoid busy-wait
+                continue;
+            }
             return -1;
         }
     }
@@ -1465,6 +1472,8 @@ int main(void) {
   term.win_height = WIN_HEIGHT;
   reset_sgr(&term);
 
+  mouse_init(window, term_cols, term_rows, WIN_PADDING, char_w, char_h);
+
   parser_callbacks_t cbs = {
     .on_print   = on_print,
     .on_execute = on_execute,
@@ -1577,10 +1586,16 @@ int main(void) {
       if (new_rows < 1) new_rows = 1;
       pty_resize(master_fd, new_cols, new_rows);
       screen_buf_resize(&term.screen, new_rows, new_cols);
+      mouse_update_geometry(new_cols, new_rows, WIN_PADDING, char_w, char_h);
+      // Clamp cursor position after resize to prevent OOB access in render
+      if (term.cx >= new_cols) term.cx = new_cols - 1;
+      if (term.cy >= new_rows) term.cy = new_rows - 1;
     }
 
-    // Mouse-based text selection (only when mouse tracking is OFF)
-    if (!mouse_is_enabled()) {
+    // Forward mouse events to PTY when mouse tracking is enabled
+    if (mouse_is_enabled()) {
+      if (process_mouse_input(master_fd) < 0) break;
+    } else {
       handle_mouse_selection(&term, window, master_fd, char_w, char_h);
     }
 
@@ -1634,7 +1649,8 @@ int main(void) {
           if (scrollback_get(term.scrollback, sb_idx, line, term_cols)) {
             screen_cell_t *scroll_cells = calloc((size_t)term.screen.cols,
                                                   sizeof(*scroll_cells));
-            for (int c = 0; c < term.screen.cols; c++) {
+            int sb_render_cols = term_cols < term.screen.cols ? term_cols : term.screen.cols;
+            for (int c = 0; c < sb_render_cols; c++) {
               if (scroll_cells) {
                 scroll_cells[c].ch = line[c];
                 scroll_cells[c].fg[0] = default_fg[0];

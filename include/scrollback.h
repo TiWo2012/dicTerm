@@ -73,4 +73,9 @@ void scrollback_clear(scrollback_t *sb);
  */
 void scrollback_reset(scrollback_t *sb);
 
+/**
+ * Return the fixed column width of the scrollback buffer.
+ */
+int scrollback_cols(const scrollback_t *sb);
+
 #endif // SCROLLBACK_H

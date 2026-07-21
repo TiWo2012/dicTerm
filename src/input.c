@@ -7,6 +7,7 @@
  * GetCharPressed), C0 controls (Ctrl+letter), cursor keys, function keys,
  * keypad, and modifier combinations (Ctrl, Alt, Shift).
  */
+#define _DEFAULT_SOURCE
 #include "input.h"
 
 #include <errno.h>
@@ -31,8 +32,10 @@ static int write_all(int fd, const uint8_t *buf, int len) {
       // Unexpected from a PTY master; treat as error.
       return -1;
     } else {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        usleep(1000); // yield to avoid busy-wait
         continue; // try again (non-blocking fd)
+      }
       return -1;
     }
   }
@@ -382,10 +385,10 @@ int process_keyboard_input(int fd) {
         for (int i = 0; i < utf8_len && alt_pos < INPUT_MAX_SEQ - 1; i++) {
           alt_buf[alt_pos++] = utf8[i];
         }
-        if (write_all(fd, alt_buf, alt_pos) < 0) return -1;
+        if (write_all(fd, alt_buf, alt_pos) < 0) goto fail;
         total_written += alt_pos;
       } else {
-        if (write_all(fd, utf8, utf8_len) < 0) return -1;
+        if (write_all(fd, utf8, utf8_len) < 0) goto fail;
         total_written += utf8_len;
       }
     }
@@ -409,7 +412,7 @@ int process_keyboard_input(int fd) {
 
     int len = key_to_seq(key, shift_held, ctrl_held, alt_held, seq);
     if (len > 0) {
-      if (write_all(fd, seq, len) < 0) return -1;
+      if (write_all(fd, seq, len) < 0) goto fail;
       total_written += len;
     }
   }
@@ -417,6 +420,12 @@ int process_keyboard_input(int fd) {
   char_queue_count = 0;
   key_queue_count = 0;
   return total_written;
+
+fail:
+  // On write error, drain queues so we don't retry the same keys forever.
+  char_queue_count = 0;
+  key_queue_count = 0;
+  return -1;
 }
 
 // ===========================================================================

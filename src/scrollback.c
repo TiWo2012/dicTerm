@@ -175,6 +175,15 @@ void scrollback_clear(scrollback_t *sb) {
 }
 
 /**
+ * @brief Return the fixed column width of the scrollback buffer.
+ * @param sb  Scrollback handle (NULL returns 0).
+ * @return    The number of codepoints per line.
+ */
+int scrollback_cols(const scrollback_t *sb) {
+  return sb ? sb->cols : 0;
+}
+
+/**
  * @brief Fully reset the scrollback buffer (including total-pushed counter).
  *
  * Unlike scrollback_clear(), this also resets the monotonic
