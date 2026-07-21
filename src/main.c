@@ -2,7 +2,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_X11
+#include <GLFW/glfw3native.h>
 #include <GL/glcorearb.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -1385,6 +1389,28 @@ int main(void) {
   }
   glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
+
+  // ── Background blur (X11 / KWin compositor) ──────────────────────────
+  // The _KDE_NET_WM_BLUR_BEHIND_REGION atom instructs KWin to blur
+  // behind the window.  We set a single rectangle covering the window
+  // and re-apply it on resize so the blur region stays in sync.
+  static unsigned long blur_rect[4] = {0, 0, 0, 0};
+  static Atom blur_atom = None;
+  static Display *x11_dpy = NULL;
+  static Window x11_win = 0;
+  if (cfg.bg_blur) {
+    x11_dpy = glfwGetX11Display();
+    x11_win = glfwGetX11Window(window);
+    if (x11_dpy && x11_win) {
+      blur_atom = XInternAtom(x11_dpy, "_KDE_NET_WM_BLUR_BEHIND_REGION", False);
+      blur_rect[2] = (unsigned long)WIN_WIDTH;
+      blur_rect[3] = (unsigned long)WIN_HEIGHT;
+      if (blur_atom != None)
+        XChangeProperty(x11_dpy, x11_win, blur_atom, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char*)blur_rect, 4);
+    }
+  }
+
   input_init(window);
   clipboard_init(window);
 
@@ -1577,6 +1603,15 @@ int main(void) {
     if (new_w != term.win_width || new_h != term.win_height) {
       term.win_width  = new_w;
       term.win_height = new_h;
+
+      // Keep blur region in sync with window size
+      if (blur_atom != None) {
+        blur_rect[2] = (unsigned long)new_w;
+        blur_rect[3] = (unsigned long)new_h;
+        XChangeProperty(x11_dpy, x11_win, blur_atom, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char*)blur_rect, 4);
+      }
+
       int new_cols = (new_w - WIN_PADDING * 2) / (int)char_w;
       int new_rows = (new_h - WIN_PADDING * 2) / (int)char_h;
       if (new_cols < 1) new_cols = 1;
