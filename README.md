@@ -461,6 +461,6 @@ documented with Doxygen comments.
 - [x] Background blur behind window
 - [x] Text selection (click-drag, PRIMARY auto-copy)
 - [x] Alternate screen buffer
-- [ ] GPU-accelerated rendering via OpenGL
+- [x] GPU-accelerated rendering via OpenGL
 - [ ] Tabbed / multi-window support
 - [ ] Sixel / Kitty graphics protocol
